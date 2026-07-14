@@ -52,6 +52,11 @@ Fonts (Archivo, Manrope, JetBrains Mono) are bundled in `fonts.css`, also with n
   person directly (it can never be displayed again, only reset from the key icon next to
   their row).
 - **Owner** login uses the shared passcode set in step 3 above — there's no per-owner account.
+  The Owner tab is hidden from the login screen by default (so a customer you sell this to
+  never sees it) — visit with `?ohowner=1` in the URL, e.g.
+  `https://vizho11.github.io/org-handler/?ohowner=1`, to reveal it. This is obscurity, not real
+  access control (anyone reading the source can find the parameter), but it keeps the option
+  from ever appearing for regular members.
 - There's no "forgot passcode" flow for the owner passcode short of running
   `update admin_config set passcode_hash = null;` in the SQL editor and re-running
   `owner_set_passcode(...)`. Member passwords, on the other hand, can be reset any time from
