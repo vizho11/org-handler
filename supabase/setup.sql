@@ -47,7 +47,6 @@ create table if not exists teams (
   game text not null default 'BGMI',
   created_at timestamptz not null default now()
 );
-create index if not exists teams_org_idx on teams(org_id);
 
 -- Accountant and player accounts. Org-owner-provisioned, never self-signup.
 create table if not exists members (
@@ -62,7 +61,6 @@ create table if not exists members (
   active boolean not null default true,
   created_at timestamptz not null default now()
 );
-create index if not exists members_org_idx on members(org_id);
 create index if not exists members_team_idx on members(team_id);
 
 -- A purchased lobby/scrim slot, assigned to a team for a given day. This is what the manager
@@ -80,7 +78,6 @@ create table if not exists slots (
   notes text default '',
   created_at timestamptz not null default now()
 );
-create index if not exists slots_org_idx on slots(org_id);
 create index if not exists slots_date_idx on slots(slot_date);
 create index if not exists slots_team_idx on slots(team_id);
 
@@ -99,7 +96,6 @@ create table if not exists transactions (
   recorded_by text default '',
   created_at timestamptz not null default now()
 );
-create index if not exists transactions_org_idx on transactions(org_id);
 create index if not exists transactions_date_idx on transactions(txn_date);
 create index if not exists transactions_team_idx on transactions(team_id);
 
@@ -153,6 +149,13 @@ alter table teams alter column org_id set not null;
 alter table members alter column org_id set not null;
 alter table slots alter column org_id set not null;
 alter table transactions alter column org_id set not null;
+
+-- Indexed only now that org_id is guaranteed to exist (added above via ALTER for an
+-- already-live install, or as part of CREATE TABLE for a fresh one).
+create index if not exists teams_org_idx on teams(org_id);
+create index if not exists members_org_idx on members(org_id);
+create index if not exists slots_org_idx on slots(org_id);
+create index if not exists transactions_org_idx on transactions(org_id);
 
 -- ==SPLIT-POINT== if pasting this script in two parts, run everything above this line first,
 -- confirm it succeeds, then run everything from here down as a second query.
