@@ -154,6 +154,9 @@ alter table members alter column org_id set not null;
 alter table slots alter column org_id set not null;
 alter table transactions alter column org_id set not null;
 
+-- ==SPLIT-POINT== if pasting this script in two parts, run everything above this line first,
+-- confirm it succeeds, then run everything from here down as a second query.
+
 -- ============================================================
 -- ROW LEVEL SECURITY
 -- ============================================================
