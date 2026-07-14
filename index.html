@@ -299,12 +299,6 @@ const SUPABASE_URL = 'https://ixfuyoqrqaftuihwcvjw.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml4ZnV5b3FycWFmdHVpaHdjdmp3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM5NjQyNDIsImV4cCI6MjA5OTU0MDI0Mn0.k7x0WvHF92xDft3lUGanIU_ha9rEjPZ8C65knPFtQkQ';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Owner login is hidden by default — visit with ?ohowner=1 in the URL (e.g.
-// https://your-app/index.html?ohowner=1) to reveal the Owner tab on the login screen.
-// This is obscurity, not real access control (anyone reading the source can find the
-// parameter), but it keeps the option from ever appearing for regular members.
-const OWNER_PARAM = new URLSearchParams(location.search).has('ohowner');
-
 // ============================================================
 // Icons (inline SVG, no emoji)
 // ============================================================
@@ -441,12 +435,11 @@ function renderLogin(){
           <p>Esports org finance &amp; lobby console</p>
         </div>
       </div>
-      ${OWNER_PARAM ? `
       <div class="login-tabs">
         <button class="login-tab ${loginTab==='member'?'active':''}" data-tab="member">Member</button>
         <button class="login-tab ${loginTab==='owner'?'active':''}" data-tab="owner">Owner</button>
-      </div>` : ''}
-      ${loginTab === 'owner' && OWNER_PARAM ? `
+      </div>
+      ${loginTab === 'owner' ? `
       <form id="ownerLoginForm">
         <label class="field"><span class="lbl">Owner passcode</span>
           <input type="password" name="passcode" required autocomplete="current-password">
@@ -503,8 +496,8 @@ function bindLogin(){
     const btn = ownerForm.querySelector('button');
     btn.disabled = true;
     try {
-      const ok = await rpc('owner_verify_passcode', { p_passcode: fd.get('passcode') });
-      if (!ok){
+      const orgId = await rpc('org_owner_verify_passcode', { p_passcode: fd.get('passcode') });
+      if (!orgId){
         errEl().textContent = 'Incorrect passcode.';
         errEl().style.display = 'block';
         return;
