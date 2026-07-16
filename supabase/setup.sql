@@ -78,6 +78,10 @@ create table if not exists slots (
   cost numeric not null default 0,
   status text not null default 'booked' check (status in ('booked','completed','cancelled')),
   notes text default '',
+  placement int,
+  points integer not null default 0,
+  won_prize boolean not null default false,
+  prize_amount numeric not null default 0,
   created_at timestamptz not null default now()
 );
 create index if not exists slots_date_idx on slots(slot_date);
@@ -108,6 +112,10 @@ create index if not exists transactions_team_idx on transactions(team_id);
 -- ============================================================
 alter table orgs add column if not exists owner_name text not null default '';
 alter table orgs add column if not exists contact text not null default '';
+alter table slots add column if not exists placement int;
+alter table slots add column if not exists points integer not null default 0;
+alter table slots add column if not exists won_prize boolean not null default false;
+alter table slots add column if not exists prize_amount numeric not null default 0;
 alter table teams add column if not exists org_id uuid references orgs(id) on delete cascade;
 alter table members add column if not exists org_id uuid references orgs(id) on delete cascade;
 alter table slots add column if not exists org_id uuid references orgs(id) on delete cascade;
@@ -622,9 +630,13 @@ $$;
 -- Slots / lobbies (owner + accountant can write; any authorized caller in the same org can read)
 -- ============================================================
 
+-- Return columns grew (placement/points/won_prize/prize_amount) -- create or replace can't
+-- change a function's return type, so the old signature has to be dropped first.
+drop function if exists list_slots(text, uuid, text, date, date);
 create or replace function list_slots(p_passcode text, p_member_id uuid, p_password text, p_from date default null, p_to date default null)
 returns table(id uuid, team_id uuid, team_name text, slot_date date, start_time text, end_time text,
-              lobby_type text, cost numeric, status text, notes text, created_at timestamptz)
+              lobby_type text, cost numeric, status text, notes text, placement int, points int,
+              won_prize boolean, prize_amount numeric, created_at timestamptz)
 language plpgsql security definer as $$
 declare
   v_org_id uuid;
@@ -635,7 +647,8 @@ begin
   end if;
   return query
     select s.id, s.team_id, coalesce(t.name,''), s.slot_date, s.start_time, s.end_time,
-           s.lobby_type, s.cost, s.status, s.notes, s.created_at
+           s.lobby_type, s.cost, s.status, s.notes, s.placement, s.points, s.won_prize, s.prize_amount,
+           s.created_at
     from slots s left join teams t on t.id = s.team_id
     where s.org_id = v_org_id
       and (p_from is null or s.slot_date >= p_from) and (p_to is null or s.slot_date <= p_to)
@@ -652,6 +665,7 @@ language plpgsql security definer as $$
 declare
   v_role text; v_org_id uuid;
   v_id uuid;
+  v_cost numeric := coalesce(p_cost, 0);
 begin
   select rc.role, rc.org_id into v_role, v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
   if v_role not in ('owner','accountant') then
@@ -662,20 +676,36 @@ begin
   end if;
   insert into slots (org_id, team_id, slot_date, start_time, end_time, lobby_type, cost, notes)
     values (v_org_id, p_team_id, p_slot_date, coalesce(p_start_time,''), coalesce(p_end_time,''),
-            coalesce(nullif(trim(p_lobby_type),''),'scrim'), coalesce(p_cost,0), coalesce(p_notes,''))
+            coalesce(nullif(trim(p_lobby_type),''),'scrim'), v_cost, coalesce(p_notes,''))
     returning id into v_id;
+  -- Slot cost auto-posts as a finance expense so the manager never enters it twice.
+  if v_cost > 0 then
+    insert into transactions (org_id, txn_date, type, category, amount, description, team_id, slot_id, recorded_by)
+      values (v_org_id, p_slot_date, 'expense', 'slot_purchase', v_cost,
+              'Slot cost — ' || coalesce(nullif(trim(p_lobby_type),''),'scrim') || ' on ' || p_slot_date,
+              p_team_id, v_id, 'Auto (slot)');
+  end if;
   return jsonb_build_object('success', true, 'id', v_id);
 end;
 $$;
 
+-- Parameter list grew (placement/points/won_prize/prize_amount) -- create or replace treats a
+-- different parameter list as a different overload, so the old 12-arg signature has to go first
+-- or it'd linger alongside the new one.
+drop function if exists update_slot(text, uuid, text, uuid, uuid, date, text, text, text, numeric, text, text);
 create or replace function update_slot(
   p_passcode text, p_member_id uuid, p_password text,
   p_slot_id uuid, p_team_id uuid, p_slot_date date, p_start_time text, p_end_time text,
-  p_lobby_type text, p_cost numeric, p_status text, p_notes text
+  p_lobby_type text, p_cost numeric, p_status text, p_notes text,
+  p_placement int default null, p_points int default 0,
+  p_won_prize boolean default false, p_prize_amount numeric default 0
 ) returns boolean
 language plpgsql security definer as $$
 declare
   v_role text; v_org_id uuid;
+  v_cost numeric := coalesce(p_cost, 0);
+  v_prize numeric := case when p_won_prize then coalesce(p_prize_amount, 0) else 0 end;
+  v_lobby_type text := coalesce(nullif(trim(p_lobby_type),''),'scrim');
 begin
   select rc.role, rc.org_id into v_role, v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
   if v_role not in ('owner','accountant') then return false; end if;
@@ -684,10 +714,45 @@ begin
     return false;
   end if;
   update slots set team_id = p_team_id, slot_date = p_slot_date, start_time = coalesce(p_start_time,''),
-    end_time = coalesce(p_end_time,''), lobby_type = coalesce(nullif(trim(p_lobby_type),''),'scrim'),
-    cost = coalesce(p_cost,0), status = p_status, notes = coalesce(p_notes,'')
+    end_time = coalesce(p_end_time,''), lobby_type = v_lobby_type,
+    cost = v_cost, status = p_status, notes = coalesce(p_notes,''),
+    placement = p_placement, points = coalesce(p_points,0),
+    won_prize = coalesce(p_won_prize,false), prize_amount = v_prize
   where id = p_slot_id and org_id = v_org_id;
-  return found;
+  if not found then return false; end if;
+
+  -- Keep the linked expense transaction in sync with cost (create/update/remove as needed)
+  -- so the manager never has to hand-edit the finance entry for a slot's cost.
+  if v_cost > 0 then
+    if exists(select 1 from transactions where slot_id = p_slot_id and type = 'expense') then
+      update transactions set amount = v_cost, txn_date = p_slot_date, team_id = p_team_id,
+        description = 'Slot cost — ' || v_lobby_type || ' on ' || p_slot_date
+      where slot_id = p_slot_id and type = 'expense';
+    else
+      insert into transactions (org_id, txn_date, type, category, amount, description, team_id, slot_id, recorded_by)
+        values (v_org_id, p_slot_date, 'expense', 'slot_purchase', v_cost,
+                'Slot cost — ' || v_lobby_type || ' on ' || p_slot_date, p_team_id, p_slot_id, 'Auto (slot)');
+    end if;
+  else
+    delete from transactions where slot_id = p_slot_id and type = 'expense';
+  end if;
+
+  -- Same treatment for prize money, symmetric with the expense side above.
+  if v_prize > 0 then
+    if exists(select 1 from transactions where slot_id = p_slot_id and type = 'income') then
+      update transactions set amount = v_prize, txn_date = p_slot_date, team_id = p_team_id,
+        description = 'Prize — ' || v_lobby_type || ' on ' || p_slot_date
+      where slot_id = p_slot_id and type = 'income';
+    else
+      insert into transactions (org_id, txn_date, type, category, amount, description, team_id, slot_id, recorded_by)
+        values (v_org_id, p_slot_date, 'income', 'prize_money', v_prize,
+                'Prize — ' || v_lobby_type || ' on ' || p_slot_date, p_team_id, p_slot_id, 'Auto (slot)');
+    end if;
+  else
+    delete from transactions where slot_id = p_slot_id and type = 'income';
+  end if;
+
+  return true;
 end;
 $$;
 
@@ -699,6 +764,9 @@ declare
 begin
   select rc.role, rc.org_id into v_role, v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
   if v_role not in ('owner','accountant') then return false; end if;
+  -- Remove the slot's auto-posted expense/prize transactions too, so deleting a slot doesn't
+  -- leave orphaned money entries behind in the finance ledger.
+  delete from transactions where slot_id = p_slot_id and org_id = v_org_id;
   delete from slots where id = p_slot_id and org_id = v_org_id;
   return found;
 end;
