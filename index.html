@@ -385,8 +385,12 @@ async function render(){
     return;
   }
   if (isOwner() && !session.org){
-    await loadOwnerProfile();
-    saveSession();
+    try {
+      await loadOwnerProfile();
+      saveSession();
+    } catch (e) {
+      session.org = { name: '', ownerName: '', contact: '' };
+    }
   }
   app.innerHTML = renderShell();
   bindShell();
@@ -513,7 +517,11 @@ function bindLogin(){
         return;
       }
       session = { type: 'owner', passcode: fd.get('passcode') };
-      await loadOwnerProfile();
+      try {
+        await loadOwnerProfile();
+      } catch (err) {
+        session.org = { name: '', ownerName: '', contact: '' };
+      }
       saveSession();
       route = 'dashboard';
       render();
