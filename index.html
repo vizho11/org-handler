@@ -100,7 +100,9 @@
   }
   .sidebar-user .who { flex: 1; min-width: 0; }
   .sidebar-user .who .n { color: #fff; font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sidebar-user .who .r { color: #9098b8; font-size: 11px; }
+  .sidebar-user .who .r { color: #9098b8; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sidebar-user-editable { cursor: pointer; }
+  .sidebar-user-editable:hover { background: rgba(255,255,255,0.06); }
   .logout-btn { background: none; border: none; color: #9098b8; padding: 6px; border-radius: 6px; display: flex; }
   .logout-btn:hover { color: #fff; background: rgba(255,255,255,0.08); }
   .logout-btn svg { width: 16px; height: 16px; }
@@ -382,9 +384,14 @@ async function render(){
     bindLogin();
     return;
   }
+  if (isOwner() && !session.org){
+    await loadOwnerProfile();
+    saveSession();
+  }
   app.innerHTML = renderShell();
   bindShell();
   await renderRoute();
+  if (isOwner() && !session.org.ownerName) openOrgProfileModal(true);
 }
 
 function bindShell(){
@@ -393,9 +400,12 @@ function bindShell(){
   const scrim = document.getElementById('sidebarScrim');
   if (menuBtn) menuBtn.onclick = () => { sidebar.classList.add('open'); scrim.classList.add('show'); };
   if (scrim) scrim.onclick = () => { sidebar.classList.remove('open'); scrim.classList.remove('show'); };
-  document.getElementById('logoutBtn').onclick = () => {
+  document.getElementById('logoutBtn').onclick = (e) => {
+    e.stopPropagation();
     session = null; localStorage.removeItem('oh_session'); route = 'dashboard'; render();
   };
+  const profileTrigger = document.getElementById('orgProfileTrigger');
+  if (profileTrigger) profileTrigger.onclick = () => openOrgProfileModal(false);
   document.querySelectorAll('.nav-item[data-nav]').forEach(btn => {
     btn.onclick = () => { nav(btn.dataset.nav); sidebar.classList.remove('open'); scrim.classList.remove('show'); };
   });
@@ -503,10 +513,62 @@ function bindLogin(){
         return;
       }
       session = { type: 'owner', passcode: fd.get('passcode') };
+      await loadOwnerProfile();
       saveSession();
       route = 'dashboard';
       render();
+      if (!session.org.ownerName) openOrgProfileModal(true);
     } finally { btn.disabled = false; }
+  };
+}
+
+// Fetches the org's name/owner-name/contact and caches it on the session so the sidebar can
+// show "Acme Esports / Priya Sharma" instead of the generic "Owner" label.
+async function loadOwnerProfile(){
+  const [profile] = await rpc('owner_get_profile', { p_passcode: session.passcode });
+  session.org = { name: profile.org_name, ownerName: profile.owner_name, contact: profile.contact };
+}
+
+function openOrgProfileModal(isFirstTime){
+  const org = session.org || { name: '', ownerName: '', contact: '' };
+  openModal(`
+    <div class="modal-panel">
+      <div class="modal-head">
+        <h3>${isFirstTime ? 'Set up your org' : 'Edit org profile'}</h3>
+        ${isFirstTime ? '' : '<button class="modal-close">' + icon('close') + '</button>'}
+      </div>
+      ${isFirstTime ? '<p class="hint" style="margin:-4px 0 14px">Tell us who\'s running this org — it replaces the generic "Owner" label in the sidebar.</p>' : ''}
+      <form id="orgProfileForm">
+        <label class="field"><span class="lbl">Org name</span>
+          <input type="text" name="org_name" required value="${escapeHtml(org.name || '')}">
+        </label>
+        <label class="field"><span class="lbl">Owner name</span>
+          <input type="text" name="owner_name" required value="${escapeHtml(org.ownerName || '')}">
+        </label>
+        <label class="field"><span class="lbl">Contact (phone or email)</span>
+          <input type="text" name="contact" value="${escapeHtml(org.contact || '')}">
+        </label>
+        <button class="btn btn-primary btn-block" type="submit">Save</button>
+      </form>
+    </div>`);
+  document.getElementById('orgProfileForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const ok = await rpc('owner_update_profile', {
+      p_passcode: session.passcode,
+      p_org_name: fd.get('org_name'),
+      p_owner_name: fd.get('owner_name'),
+      p_contact: fd.get('contact') || ''
+    });
+    if (ok) {
+      session.org = { name: fd.get('org_name').trim(), ownerName: fd.get('owner_name').trim(), contact: (fd.get('contact')||'').trim() };
+      saveSession();
+      toast('Org profile saved', 'success');
+      closeModal();
+      render();
+    } else {
+      toast('Could not save — check both fields are filled in', 'error');
+    }
   };
 }
 
@@ -534,7 +596,8 @@ const PLAYER_NAV = [
 function renderShell(){
   const role = myRole();
   const navItems = role === 'owner' ? OWNER_NAV : role === 'accountant' ? ACCOUNTANT_NAV : PLAYER_NAV;
-  const who = isOwner() ? 'Owner' : session.member.name;
+  const who = isOwner() ? (session.org && session.org.name) || 'Owner' : session.member.name;
+  const subLabel = isOwner() ? ((session.org && session.org.ownerName) || 'Set up profile') : roleLabel(role);
   return `
   <div class="shell">
     <div class="sidebar-scrim" id="sidebarScrim"></div>
@@ -552,9 +615,9 @@ function renderShell(){
         `).join('')}
       </nav>
       <div class="sidebar-foot">
-        <div class="sidebar-user">
+        <div class="sidebar-user${isOwner() ? ' sidebar-user-editable' : ''}" ${isOwner() ? 'id="orgProfileTrigger" title="Edit org profile"' : ''}>
           <div class="avatar">${initials(who)}</div>
-          <div class="who"><div class="n">${escapeHtml(who)}</div><div class="r">${roleLabel(role)}</div></div>
+          <div class="who"><div class="n">${escapeHtml(who)}</div><div class="r">${escapeHtml(subLabel)}</div></div>
           <button class="logout-btn" id="logoutBtn" title="Log out">${icon('logout')}</button>
         </div>
       </div>
@@ -874,7 +937,7 @@ function openTxModal(tx){
         ...authTriple(), p_txn_date: fd.get('txn_date'), p_type: fd.get('type'), p_category: fd.get('category'),
         p_amount: Number(fd.get('amount') || 0), p_description: fd.get('description') || '',
         p_team_id: fd.get('team_id') || null, p_slot_id: null,
-        p_recorded_by: isOwner() ? 'Owner' : session.member.name
+        p_recorded_by: isOwner() ? ((session.org && session.org.ownerName) || 'Owner') : session.member.name
       });
       if (res.success) { toast('Transaction added', 'success'); closeModal(); renderRoute(); } else toast(res.error || 'Could not create', 'error');
     } else {

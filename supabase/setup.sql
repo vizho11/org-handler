@@ -33,6 +33,8 @@ create index if not exists auth_attempts_target_idx on auth_attempts(target, att
 create table if not exists orgs (
   id uuid primary key default gen_random_uuid(),
   name text not null,
+  owner_name text not null default '',
+  contact text not null default '',
   passcode_hash text not null,
   active boolean not null default true,
   created_at timestamptz not null default now()
@@ -104,6 +106,8 @@ create index if not exists transactions_team_idx on transactions(team_id);
 -- shape). A brand-new install has every org_id column already nullable-then-backfilled to
 -- nothing, so this whole block is a same-as-before no-op there.
 -- ============================================================
+alter table orgs add column if not exists owner_name text not null default '';
+alter table orgs add column if not exists contact text not null default '';
 alter table teams add column if not exists org_id uuid references orgs(id) on delete cascade;
 alter table members add column if not exists org_id uuid references orgs(id) on delete cascade;
 alter table slots add column if not exists org_id uuid references orgs(id) on delete cascade;
@@ -334,6 +338,37 @@ begin
     perform record_auth_attempt(v_target);
   end if;
   return v_org_id;
+end;
+$$;
+
+-- Org profile (name/owner name/contact the owner fills in on first login, shown in the
+-- sidebar instead of the generic "Owner" label) ------------------------------------------
+
+create or replace function owner_get_profile(p_passcode text)
+returns table(org_name text, owner_name text, contact text)
+language plpgsql security definer as $$
+declare
+  v_org_id uuid := org_owner_verify_passcode(p_passcode);
+begin
+  if v_org_id is null then
+    raise exception 'invalid owner passcode';
+  end if;
+  return query select o.name, o.owner_name, o.contact from orgs o where o.id = v_org_id;
+end;
+$$;
+
+create or replace function owner_update_profile(p_passcode text, p_org_name text, p_owner_name text, p_contact text)
+returns boolean
+language plpgsql security definer as $$
+declare
+  v_org_id uuid := org_owner_verify_passcode(p_passcode);
+begin
+  if v_org_id is null then return false; end if;
+  if p_org_name is null or trim(p_org_name) = '' then return false; end if;
+  if p_owner_name is null or trim(p_owner_name) = '' then return false; end if;
+  update orgs set name = trim(p_org_name), owner_name = trim(p_owner_name), contact = coalesce(trim(p_contact),'')
+  where id = v_org_id;
+  return found;
 end;
 $$;
 
