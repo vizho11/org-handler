@@ -844,16 +844,16 @@ function openSlotModal(slot){
         <label class="field"><span class="lbl">Notes</span><textarea name="notes">${isNew ? '' : escapeHtml(slot.notes || '')}</textarea></label>
         ${!isNew ? `
         <div class="field-divider"><span>Match result</span></div>
-        <div class="form-row">
+        <div class="form-row" id="placementPointsWrap">
           <label class="field"><span class="lbl">Placement</span><input type="number" name="placement" min="1" placeholder="e.g. 1" value="${slot.placement == null ? '' : slot.placement}"></label>
           <label class="field"><span class="lbl">Points scored</span><input type="number" name="points" min="0" value="${slot.points || 0}"></label>
         </div>
         <label class="field checkbox-field">
           <input type="checkbox" name="won_prize" id="wonPrizeCheck" ${slot.won_prize ? 'checked' : ''}>
-          <span class="lbl">Won a prize</span>
+          <span class="lbl" id="wonPrizeLabel">Won a prize</span>
         </label>
-        <label class="field"><span class="lbl">Prize amount (₹)</span><input type="number" name="prize_amount" id="prizeAmountInput" min="0" value="${slot.prize_amount || 0}" ${slot.won_prize ? '' : 'disabled'}></label>
-        ` : `<p class="hint">Placement, points and prize can be entered once you edit this slot after it's played.</p>`}
+        <label class="field"><span class="lbl" id="prizeAmountLabel">Prize amount (₹)</span><input type="number" name="prize_amount" id="prizeAmountInput" min="0" value="${slot.prize_amount || 0}" ${slot.won_prize ? '' : 'disabled'}></label>
+        ` : `<p class="hint">Match result fields can be entered once you edit this slot after it's played.</p>`}
         <button class="btn btn-primary btn-block" type="submit">${isNew ? 'Create slot' : 'Save changes'}</button>
       </form>
     </div>`);
@@ -888,10 +888,19 @@ function openSlotModal(slot){
   const lobbyTypeSelect = document.getElementById('lobbyTypeSelect');
   const timeFieldsWrap = document.getElementById('timeFieldsWrap');
   const tournamentNameWrap = document.getElementById('tournamentNameWrap');
+  const placementPointsWrap = document.getElementById('placementPointsWrap');
+  const wonPrizeLabel = document.getElementById('wonPrizeLabel');
+  const prizeAmountLabel = document.getElementById('prizeAmountLabel');
   function syncLobbyTypeFields(){
     const isTournament = lobbyTypeSelect.value === 'tournament';
+    const isClashSquad = lobbyTypeSelect.value === 'clash_squad';
     timeFieldsWrap.style.display = isTournament ? 'none' : '';
     tournamentNameWrap.style.display = isTournament ? '' : 'none';
+    // Clash Squad is a straight win/lose bet match, not a ranked battle-royale lobby —
+    // placement and points don't apply there.
+    if (placementPointsWrap) placementPointsWrap.style.display = isClashSquad ? 'none' : '';
+    if (wonPrizeLabel) wonPrizeLabel.textContent = isClashSquad ? 'Won the bet' : 'Won a prize';
+    if (prizeAmountLabel) prizeAmountLabel.textContent = isClashSquad ? 'Payout amount (₹)' : 'Prize amount (₹)';
   }
   lobbyTypeSelect.onchange = syncLobbyTypeFields;
   syncLobbyTypeFields();
