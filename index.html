@@ -197,7 +197,7 @@
   label.field { display: block; margin-bottom: 14px; }
   label.field .lbl { display: block; font-size: 12.5px; font-weight: 700; color: var(--ink-secondary); margin-bottom: 6px; }
   input[type=text], input[type=email], input[type=password], input[type=number], input[type=date],
-  input[type=datetime-local], input[type=tel], select, textarea {
+  input[type=time], input[type=datetime-local], input[type=tel], select, textarea {
     width: 100%; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong);
     background: var(--surface); font-size: 16px; color: var(--ink-primary); min-height: 44px;
   }
@@ -376,6 +376,7 @@ function fmtDate(d){ if(!d) return '—'; const dt = new Date(d); return dt.toLo
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function initials(name){ return (name||'?').trim().split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase(); }
 function statusLabel(s){ return (s||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()); }
+function lobbyTypeLabel(s){ return (s.lobby_type === 'tournament' && s.tournament_name) ? s.tournament_name : statusLabel(s.lobby_type); }
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function roleLabel(r){ return r === 'owner' ? 'Owner' : r === 'accountant' ? 'Accountant' : 'Player'; }
 
@@ -722,7 +723,7 @@ async function renderDashboard(){
       ${upcoming.length ? upcoming.map(s => `
         <div class="list-row">
           <div>
-            <div class="main-text">${escapeHtml(s.team_name || 'Unassigned')} — ${escapeHtml(statusLabel(s.lobby_type))}</div>
+            <div class="main-text">${escapeHtml(s.team_name || 'Unassigned')} — ${escapeHtml(lobbyTypeLabel(s))}</div>
             <div class="sub-text">${fmtDate(s.slot_date)}${s.start_time ? ' · ' + escapeHtml(s.start_time) + (s.end_time ? '–' + escapeHtml(s.end_time) : '') : ''}</div>
           </div>
           <span class="pill pill-${s.status}">${statusLabel(s.status)}</span>
@@ -759,7 +760,7 @@ async function renderSlots(){
       <td>${fmtDate(s.slot_date)}</td>
       <td>${escapeHtml(s.team_name || '—')}</td>
       <td>${s.start_time ? escapeHtml(s.start_time) + (s.end_time ? '–' + escapeHtml(s.end_time) : '') : '—'}</td>
-      <td>${escapeHtml(statusLabel(s.lobby_type))}</td>
+      <td>${escapeHtml(lobbyTypeLabel(s))}</td>
       <td class="num">${money(s.cost)}</td>
       <td><span class="pill pill-${s.status}">${statusLabel(s.status)}</span></td>
       ${canEdit() ? `<td style="text-align:right;white-space:nowrap">
@@ -810,17 +811,20 @@ function openSlotModal(slot){
         </label>
         <label class="field"><span class="lbl">Date</span><input type="date" name="slot_date" required value="${isNew ? todayISO() : slot.slot_date}"></label>
         <div class="form-row">
-          <label class="field"><span class="lbl">Start time</span><input type="text" name="start_time" placeholder="e.g. 18:00" value="${isNew ? '' : escapeHtml(slot.start_time || '')}"></label>
-          <label class="field"><span class="lbl">End time</span><input type="text" name="end_time" placeholder="e.g. 18:30" value="${isNew ? '' : escapeHtml(slot.end_time || '')}"></label>
-        </div>
-        <div class="form-row">
           <label class="field"><span class="lbl">Lobby type</span>
-            <select name="lobby_type">
-              ${['scrim','tournament','practice','custom'].map(v => `<option value="${v}" ${!isNew && slot.lobby_type===v ? 'selected' : ''}>${statusLabel(v)}</option>`).join('')}
+            <select name="lobby_type" id="lobbyTypeSelect">
+              ${['scrim','clash_squad','tournament','practice','custom'].map(v => `<option value="${v}" ${!isNew && slot.lobby_type===v ? 'selected' : ''}>${statusLabel(v)}</option>`).join('')}
             </select>
           </label>
           <label class="field"><span class="lbl">Cost (₹)</span><input type="number" name="cost" min="0" value="${isNew ? 0 : slot.cost}"></label>
         </div>
+        <div class="form-row" id="timeFieldsWrap">
+          <label class="field"><span class="lbl">Start time</span><input type="time" name="start_time" value="${isNew ? '' : escapeHtml(slot.start_time || '')}"></label>
+          <label class="field"><span class="lbl">End time</span><input type="time" name="end_time" value="${isNew ? '' : escapeHtml(slot.end_time || '')}"></label>
+        </div>
+        <label class="field" id="tournamentNameWrap"><span class="lbl">Tournament name</span>
+          <input type="text" name="tournament_name" placeholder="e.g. Summer Championship 2026" value="${isNew ? '' : escapeHtml(slot.tournament_name || '')}">
+        </label>
         ${!isNew ? `<label class="field"><span class="lbl">Status</span>
           <select name="status">
             ${['booked','completed','cancelled'].map(v => `<option value="${v}" ${slot.status===v ? 'selected' : ''}>${statusLabel(v)}</option>`).join('')}
@@ -849,7 +853,8 @@ function openSlotModal(slot){
       const res = await rpc('create_slot', {
         ...authTriple(), p_team_id: fd.get('team_id') || null, p_slot_date: fd.get('slot_date'),
         p_start_time: fd.get('start_time') || '', p_end_time: fd.get('end_time') || '',
-        p_lobby_type: fd.get('lobby_type'), p_cost: Number(fd.get('cost') || 0), p_notes: fd.get('notes') || ''
+        p_lobby_type: fd.get('lobby_type'), p_cost: Number(fd.get('cost') || 0), p_notes: fd.get('notes') || '',
+        p_tournament_name: fd.get('tournament_name') || ''
       });
       if (res.success) { toast('Slot created', 'success'); closeModal(); renderRoute(); } else toast(res.error || 'Could not create', 'error');
     } else {
@@ -858,7 +863,8 @@ function openSlotModal(slot){
         p_start_time: fd.get('start_time') || '', p_end_time: fd.get('end_time') || '',
         p_lobby_type: fd.get('lobby_type'), p_cost: Number(fd.get('cost') || 0), p_status: fd.get('status'), p_notes: fd.get('notes') || '',
         p_placement: fd.get('placement') ? Number(fd.get('placement')) : null, p_points: Number(fd.get('points') || 0),
-        p_won_prize: fd.get('won_prize') === 'on', p_prize_amount: Number(fd.get('prize_amount') || 0)
+        p_won_prize: fd.get('won_prize') === 'on', p_prize_amount: Number(fd.get('prize_amount') || 0),
+        p_tournament_name: fd.get('tournament_name') || ''
       });
       if (ok) { toast('Slot updated', 'success'); closeModal(); renderRoute(); }
     }
@@ -867,6 +873,17 @@ function openSlotModal(slot){
   if (wonPrizeCheck) wonPrizeCheck.onchange = () => {
     document.getElementById('prizeAmountInput').disabled = !wonPrizeCheck.checked;
   };
+
+  const lobbyTypeSelect = document.getElementById('lobbyTypeSelect');
+  const timeFieldsWrap = document.getElementById('timeFieldsWrap');
+  const tournamentNameWrap = document.getElementById('tournamentNameWrap');
+  function syncLobbyTypeFields(){
+    const isTournament = lobbyTypeSelect.value === 'tournament';
+    timeFieldsWrap.style.display = isTournament ? 'none' : '';
+    tournamentNameWrap.style.display = isTournament ? '' : 'none';
+  }
+  lobbyTypeSelect.onchange = syncLobbyTypeFields;
+  syncLobbyTypeFields();
 }
 
 // ============================================================
