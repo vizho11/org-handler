@@ -476,6 +476,9 @@ function renderLogin(){
       </div>
       ${loginTab === 'owner' ? `
       <form id="ownerLoginForm">
+      <label class="field"><span class="lbl">Org name</span>
+          <input type="text" name="orgname" required>
+        </label>
         <label class="field"><span class="lbl">Owner passcode</span>
           <input type="password" name="passcode" required autocomplete="current-password">
         </label>
@@ -531,7 +534,7 @@ function bindLogin(){
     const btn = ownerForm.querySelector('button');
     btn.disabled = true;
     try {
-      const orgId = await rpc('org_owner_verify_passcode', { p_passcode: fd.get('passcode') });
+     const orgId = await rpc('org_owner_login', { p_org_name: fd.get('orgname'), p_passcode: fd.get('passcode') });
       if (!orgId){
         errEl().textContent = 'Incorrect passcode.';
         errEl().style.display = 'block';
