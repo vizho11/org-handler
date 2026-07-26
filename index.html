@@ -1449,11 +1449,11 @@ function openMemberModal(member){
             <option value="accountant" ${!isNew && member.role==='accountant' ? 'selected' : ''}>Accountant (edit)</option>
           </select>
         </label>
-        ${isNew ? `<label class="field"><span class="lbl">Passcode</span><input type="text" name="password" required></label>
-        <p class="hint" style="margin-top:-10px;margin-bottom:14px">Set this yourself and share it with them directly. Team can be assigned after creation, from this same Edit form.</p>` : `
         <label class="field"><span class="lbl">Team</span>
           <select name="team_id"><option value="">— None —</option>${teamOptions}</select>
         </label>
+        ${isNew ? `<label class="field"><span class="lbl">Passcode</span><input type="text" name="password" required></label>
+        <p class="hint" style="margin-top:-10px;margin-bottom:14px">Set this yourself and share it with them directly.</p>` : `
         <label class="field"><span class="lbl">Status</span><select name="active"><option value="true" ${member.active ? 'selected' : ''}>Active</option><option value="false" ${!member.active ? 'selected' : ''}>Inactive</option></select></label>`}
         <button class="btn btn-primary btn-block" type="submit">${isNew ? 'Create member' : 'Save changes'}</button>
       </form>
@@ -1464,7 +1464,7 @@ function openMemberModal(member){
     if (isNew){
       const res = await rpc('owner_create_member', {
         p_passcode: session.passcode, p_name: fd.get('name'), p_ign: fd.get('ign'), p_phone: fd.get('phone'),
-        p_password: fd.get('password'), p_role: fd.get('role')
+        p_password: fd.get('password'), p_role: fd.get('role'), p_team_id: fd.get('team_id') || null
       });
       if (res.success) { toast('Member created', 'success'); closeModal(); renderRoute(); }
       else toast(res.error || 'Could not create', 'error');

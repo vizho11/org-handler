@@ -558,14 +558,15 @@ begin
 end;
 $$;
 
--- Parameter list changed (email/team_id dropped, ign added, password stays but the owner
--- types it now instead of it being optional) -- the old 7-arg and 5-arg signatures both have
--- to go first or they'd linger as separate overloads alongside this one. The form asks for
--- ign, name, phone, passcode, and role — team is assigned later via owner_update_member.
+-- Parameter list changed (email dropped, ign added, password stays but the owner types it
+-- now instead of it being optional) -- every prior signature has to go first or it'd linger
+-- as a separate overload alongside this one. The form asks for ign, name, phone, team,
+-- passcode, and role.
 drop function if exists owner_create_member(text, text, text, text, text, text, uuid);
 drop function if exists owner_create_member(text, text, text, text, text);
+drop function if exists owner_create_member(text, text, text, text, text, text);
 create or replace function owner_create_member(
-  p_passcode text, p_name text, p_ign text, p_phone text, p_password text, p_role text
+  p_passcode text, p_name text, p_ign text, p_phone text, p_password text, p_role text, p_team_id uuid
 ) returns jsonb
 language plpgsql security definer as $$
 declare
@@ -591,8 +592,11 @@ begin
   if exists(select 1 from members where phone = v_phone) then
     return jsonb_build_object('success', false, 'error', 'An account with this phone number already exists.');
   end if;
+  if p_team_id is not null and not exists(select 1 from teams where id = p_team_id and org_id = v_org_id) then
+    return jsonb_build_object('success', false, 'error', 'invalid team');
+  end if;
   insert into members (org_id, name, ign, phone, password_hash, role, team_id)
-    values (v_org_id, trim(p_name), coalesce(trim(p_ign),''), v_phone, crypt(p_password, gen_salt('bf')), p_role, null)
+    values (v_org_id, trim(p_name), coalesce(trim(p_ign),''), v_phone, crypt(p_password, gen_salt('bf')), p_role, p_team_id)
     returning id into v_id;
   return jsonb_build_object('success', true, 'id', v_id);
 end;
