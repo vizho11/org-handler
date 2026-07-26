@@ -220,6 +220,15 @@
   label.checkbox-field { display: flex; align-items: center; gap: 8px; }
   label.checkbox-field input[type=checkbox] { width: 17px; height: 17px; min-height: 0; flex-shrink: 0; }
   label.checkbox-field .lbl { margin-bottom: 0; }
+  .ppdrop { display: flex; gap: 8px; }
+  .ppdrop-trigger {
+    flex: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px;
+    padding: 0 12px; height: 40px; font-size: 14px; color: var(--ink-primary); cursor: pointer;
+  }
+  .ppdrop-trigger:hover { border-color: var(--ink-secondary); }
+  .ppdrop-trigger svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--ink-secondary); transition: transform 120ms ease; }
+  .ppdrop-trigger[aria-expanded="true"] svg { transform: rotate(180deg); }
   input[type=number]:disabled { opacity: .5; }
 
   .modal-backdrop {
@@ -889,14 +898,26 @@ async function openSlotModal(slot){
         <input type="hidden" id="participantsTeamId" value="${slot.team_id || ''}">
         ${!slot.team_id ? `<p class="hint">Assign a team to this slot to track each player's split.</p>`
           : teamPlayers.length ? `
-        <div id="participantsWrap" style="display:flex;flex-direction:column;gap:8px;margin-bottom:6px">
-          ${teamPlayers.map(p => `
-          <label class="field checkbox-field">
-            <input type="checkbox" name="participant" value="${p.id}" ${participantIds.has(p.id) ? 'checked' : ''}>
-            <span class="lbl">${escapeHtml(p.name)}</span>
-          </label>`).join('')}
+        <div id="participantsWrap">
+          <div class="ppdrop">
+            <button type="button" class="ppdrop-trigger" id="ppDropTrigger" aria-expanded="false">
+              <span id="ppDropSummary"></span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <button type="button" class="btn btn-ghost btn-sm" id="ppSelectAll">All ${teamPlayers.length} played</button>
+          </div>
+          <div id="ppDropPanel" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:10px">
+            <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+              <button type="button" class="btn btn-ghost btn-sm" id="ppClearAll">Clear all</button>
+            </div>
+            ${teamPlayers.map(p => `
+            <label class="field checkbox-field">
+              <input type="checkbox" name="participant" value="${p.id}" ${participantIds.has(p.id) ? 'checked' : ''}>
+              <span class="lbl">${escapeHtml(p.name)}</span>
+            </label>`).join('')}
+          </div>
         </div>
-        <p class="hint" id="splitPreview">Only checked players share this slot's net result.</p>
+        <p class="hint" id="splitPreview">Only selected players share this slot's net result.</p>
         <p class="hint" id="teamChangedHint" style="display:none">Team changed — save, then reopen this slot to set who played.</p>
         ` : `<p class="hint">No players on this slot's team yet — add them in Members to track their split.</p>`}
         ` : `<p class="hint">Match result and player split can be entered once you edit this slot after it's played.</p>`}
@@ -944,6 +965,11 @@ async function openSlotModal(slot){
   const teamSelect = document.querySelector('[name=team_id]');
   const participantsWrap = document.getElementById('participantsWrap');
   const teamChangedHint = document.getElementById('teamChangedHint');
+  const ppDropTrigger = document.getElementById('ppDropTrigger');
+  const ppDropPanel = document.getElementById('ppDropPanel');
+  const ppDropSummary = document.getElementById('ppDropSummary');
+  const ppSelectAll = document.getElementById('ppSelectAll');
+  const ppClearAll = document.getElementById('ppClearAll');
   function updateSplitPreview(){
     if (!splitPreview) return;
     const cost = Number((costInput && costInput.value) || 0);
@@ -955,14 +981,38 @@ async function openSlotModal(slot){
     const sign = share > 0 ? '+' : share < 0 ? '−' : '';
     splitPreview.textContent = `Net ${money(net)} ÷ ${checked} player${checked > 1 ? 's' : ''} = ${sign}${money(Math.abs(share))} each`;
   }
+  function updateParticipantSummary(){
+    if (!ppDropSummary) return;
+    const boxes = Array.from(document.querySelectorAll('[name=participant]'));
+    const checked = boxes.filter(b => b.checked);
+    if (!checked.length){ ppDropSummary.textContent = 'Select who played'; return; }
+    if (checked.length === boxes.length){ ppDropSummary.textContent = `All ${boxes.length} played`; return; }
+    const names = checked.map(b => b.closest('label').querySelector('.lbl').textContent);
+    ppDropSummary.textContent = names.length <= 2 ? names.join(', ') : `${names.length} players — ${names.slice(0,1).join(', ')} +${names.length - 1}`;
+  }
+  function onParticipantsChanged(){ updateSplitPreview(); updateParticipantSummary(); }
   if (wonPrizeCheck) wonPrizeCheck.onchange = () => {
     prizeAmountInput.disabled = !wonPrizeCheck.checked;
     updateSplitPreview();
   };
   if (costInput) costInput.oninput = updateSplitPreview;
   if (prizeAmountInput) prizeAmountInput.oninput = updateSplitPreview;
-  document.querySelectorAll('[name=participant]').forEach(cb => cb.onchange = updateSplitPreview);
+  document.querySelectorAll('[name=participant]').forEach(cb => cb.onchange = onParticipantsChanged);
   updateSplitPreview();
+  updateParticipantSummary();
+  if (ppDropTrigger) ppDropTrigger.onclick = () => {
+    const open = ppDropPanel.style.display !== 'none';
+    ppDropPanel.style.display = open ? 'none' : '';
+    ppDropTrigger.setAttribute('aria-expanded', String(!open));
+  };
+  if (ppSelectAll) ppSelectAll.onclick = () => {
+    document.querySelectorAll('[name=participant]').forEach(cb => cb.checked = true);
+    onParticipantsChanged();
+  };
+  if (ppClearAll) ppClearAll.onclick = () => {
+    document.querySelectorAll('[name=participant]').forEach(cb => cb.checked = false);
+    onParticipantsChanged();
+  };
   if (teamSelect && teamChangedHint) teamSelect.onchange = () => {
     const changed = teamSelect.value !== document.getElementById('participantsTeamId').value;
     if (participantsWrap) participantsWrap.style.display = changed ? 'none' : '';
