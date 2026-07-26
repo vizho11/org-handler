@@ -368,6 +368,35 @@ begin
 end;
 $$;
 
+-- Login-screen variant: requires the org's name too, not just the passcode. In this shared
+-- multi-tenant database, two customers could otherwise pick the same weak passcode; naming
+-- the org narrows a login attempt to just that one. org_owner_verify_passcode above is left
+-- untouched and still the only thing every other RPC checks post-login (session.passcode
+-- alone), so authorization elsewhere is unaffected — this only gates the initial login form.
+create or replace function org_owner_login(p_org_name text, p_passcode text)
+returns uuid
+language plpgsql security definer as $$
+declare
+  v_org_id uuid;
+  v_target text;
+begin
+  if p_org_name is null or trim(p_org_name) = '' or p_passcode is null or p_passcode = '' then
+    return null;
+  end if;
+  v_target := 'orgowner:' || left(md5(lower(trim(p_org_name)) || ':' || p_passcode), 16);
+  if not check_rate_limit(v_target) then
+    return null;
+  end if;
+  select id into v_org_id from orgs
+    where active and lower(trim(name)) = lower(trim(p_org_name)) and passcode_hash = crypt(p_passcode, passcode_hash)
+    limit 1;
+  if v_org_id is null then
+    perform record_auth_attempt(v_target);
+  end if;
+  return v_org_id;
+end;
+$$;
+
 -- Org profile (name/owner name/contact the owner fills in on first login, shown in the
 -- sidebar instead of the generic "Owner" label) ------------------------------------------
 
