@@ -106,6 +106,21 @@ create table if not exists transactions (
 create index if not exists transactions_date_idx on transactions(txn_date);
 create index if not exists transactions_team_idx on transactions(team_id);
 
+-- Which players actually played a given slot, and their resulting equal-split share of that
+-- slot's net (prize_amount - cost) — positive when the slot profited, negative when it didn't.
+-- share_amount is kept in sync (by recompute_slot_pp) whenever participants or the slot's
+-- cost/prize change, and is what members.pp_balance is the running sum of.
+create table if not exists slot_participants (
+  id uuid primary key default gen_random_uuid(),
+  slot_id uuid not null references slots(id) on delete cascade,
+  member_id uuid not null references members(id) on delete cascade,
+  share_amount numeric not null default 0,
+  created_at timestamptz not null default now(),
+  unique(slot_id, member_id)
+);
+create index if not exists slot_participants_slot_idx on slot_participants(slot_id);
+create index if not exists slot_participants_member_idx on slot_participants(member_id);
+
 -- ============================================================
 -- ONE-TIME MIGRATION (upgrading an already-live single-tenant install into this multi-tenant
 -- shape). A brand-new install has every org_id column already nullable-then-backfilled to
@@ -122,6 +137,7 @@ alter table teams add column if not exists org_id uuid references orgs(id) on de
 alter table members add column if not exists org_id uuid references orgs(id) on delete cascade;
 alter table slots add column if not exists org_id uuid references orgs(id) on delete cascade;
 alter table transactions add column if not exists org_id uuid references orgs(id) on delete cascade;
+alter table members add column if not exists pp_balance numeric not null default 0;
 
 do $$
 declare
@@ -188,6 +204,7 @@ alter table teams enable row level security;
 alter table members enable row level security;
 alter table slots enable row level security;
 alter table transactions enable row level security;
+alter table slot_participants enable row level security;
 
 -- ============================================================
 -- SECURE RPC FUNCTIONS (SECURITY DEFINER = runs with elevated privilege,
@@ -478,9 +495,12 @@ $$;
 -- Members management (org-owner-only writes, scoped to the caller's org)
 -- ============================================================
 
+-- Return columns grew (pp_balance) -- create or replace can't change a function's return
+-- type, so the old signature has to be dropped first.
+drop function if exists owner_list_members(text);
 create or replace function owner_list_members(p_passcode text)
 returns table(id uuid, name text, email text, phone text, role text, team_id uuid, team_name text,
-              active boolean, created_at timestamptz)
+              active boolean, created_at timestamptz, pp_balance numeric)
 language plpgsql security definer as $$
 declare
   v_org_id uuid := org_owner_verify_passcode(p_passcode);
@@ -489,7 +509,7 @@ begin
     raise exception 'invalid owner passcode';
   end if;
   return query
-    select m.id, m.name, m.email, m.phone, m.role, m.team_id, coalesce(t.name,''), m.active, m.created_at
+    select m.id, m.name, m.email, m.phone, m.role, m.team_id, coalesce(t.name,''), m.active, m.created_at, m.pp_balance
     from members m left join teams t on t.id = m.team_id
     where m.org_id = v_org_id
     order by m.created_at desc;
@@ -625,6 +645,171 @@ begin
   if v_org_id is null then return false; end if;
   delete from teams where id = p_team_id and org_id = v_org_id;
   return found;
+end;
+$$;
+
+-- ============================================================
+-- Player split (PP) — who played a given slot, and their equal share of its net result
+-- (prize_amount - cost). Winning slots add to each participant's pp_balance, losing slots
+-- (or slots with no prize) deduct evenly from theirs. Non-participants are untouched either
+-- way. members.pp_balance is a running total kept in sync by recompute_slot_pp below,
+-- called whenever a slot's participants or cost/prize change.
+-- ============================================================
+
+-- Internal helper (not an RPC clients call directly): re-derives one slot's contribution to
+-- every current participant's pp_balance from scratch — reverses whatever was previously
+-- applied for this slot, recomputes an even split of current net (prize_amount - cost) across
+-- however many participants are now on the slot, and reapplies it. Safe to call repeatedly.
+create or replace function recompute_slot_pp(p_slot_id uuid)
+returns void
+language plpgsql security definer as $$
+declare
+  v_net numeric;
+  v_count int;
+  v_share numeric;
+begin
+  -- Reverse whatever this slot previously contributed.
+  update members m set pp_balance = m.pp_balance - sp.share_amount
+  from slot_participants sp
+  where sp.slot_id = p_slot_id and m.id = sp.member_id;
+
+  select coalesce(prize_amount,0) - coalesce(cost,0) into v_net from slots where id = p_slot_id;
+  select count(*) into v_count from slot_participants where slot_id = p_slot_id;
+  v_share := case when v_count > 0 then round(v_net / v_count, 2) else 0 end;
+
+  update slot_participants set share_amount = v_share where slot_id = p_slot_id;
+
+  update members m set pp_balance = m.pp_balance + v_share
+  from slot_participants sp
+  where sp.slot_id = p_slot_id and m.id = sp.member_id;
+end;
+$$;
+
+-- Roster to pick participants from when marking who played a slot — active players on the
+-- slot's team, in the caller's org. Owner or accountant only (same as who can edit a slot).
+create or replace function list_team_players(p_passcode text, p_member_id uuid, p_password text, p_team_id uuid)
+returns table(id uuid, name text)
+language plpgsql security definer as $$
+declare
+  v_role text; v_org_id uuid;
+begin
+  select rc.role, rc.org_id into v_role, v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
+  if v_role not in ('owner','accountant') then
+    raise exception 'not authorized';
+  end if;
+  return query
+    select m.id, m.name from members m
+    where m.org_id = v_org_id and m.team_id = p_team_id and m.role = 'player' and m.active
+    order by m.name;
+end;
+$$;
+
+-- Current participants + their share for one slot (e.g. to prefill the edit form's checkboxes,
+-- or show "who played" anywhere). Any authorized caller in the org can read.
+create or replace function get_slot_participants(p_passcode text, p_member_id uuid, p_password text, p_slot_id uuid)
+returns table(member_id uuid, member_name text, share_amount numeric)
+language plpgsql security definer as $$
+declare
+  v_org_id uuid;
+begin
+  select rc.org_id into v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
+  if v_org_id is null then
+    raise exception 'not authorized';
+  end if;
+  if not exists(select 1 from slots where id = p_slot_id and org_id = v_org_id) then
+    raise exception 'invalid slot';
+  end if;
+  return query
+    select sp.member_id, m.name, sp.share_amount
+    from slot_participants sp join members m on m.id = sp.member_id
+    where sp.slot_id = p_slot_id
+    order by m.name;
+end;
+$$;
+
+-- Sets the full participant list for a slot (replacing whatever was there before) and
+-- recomputes the split. Owner or accountant only.
+create or replace function owner_set_slot_participants(
+  p_passcode text, p_member_id uuid, p_password text,
+  p_slot_id uuid, p_participant_ids uuid[]
+) returns jsonb
+language plpgsql security definer as $$
+declare
+  v_role text; v_org_id uuid;
+  v_team_id uuid;
+  v_bad_count int;
+begin
+  select rc.role, rc.org_id into v_role, v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
+  if v_role not in ('owner','accountant') then
+    return jsonb_build_object('success', false, 'error', 'not authorized');
+  end if;
+  select team_id into v_team_id from slots where id = p_slot_id and org_id = v_org_id;
+  if not found then
+    return jsonb_build_object('success', false, 'error', 'invalid slot');
+  end if;
+
+  select count(*) into v_bad_count
+  from unnest(coalesce(p_participant_ids, '{}')) pid
+  where not exists(
+    select 1 from members where id = pid and org_id = v_org_id and team_id = v_team_id and role = 'player'
+  );
+  if v_bad_count > 0 then
+    return jsonb_build_object('success', false, 'error', 'one or more players are not on this slot''s team');
+  end if;
+
+  -- Reverse this slot's current contribution before swapping the participant list, so
+  -- recompute_slot_pp below starts from a clean slate for whoever is newly on/off it.
+  update members m set pp_balance = m.pp_balance - sp.share_amount
+  from slot_participants sp
+  where sp.slot_id = p_slot_id and m.id = sp.member_id;
+
+  delete from slot_participants where slot_id = p_slot_id;
+  insert into slot_participants (slot_id, member_id)
+    select p_slot_id, pid from unnest(coalesce(p_participant_ids, '{}')) pid;
+
+  perform recompute_slot_pp(p_slot_id);
+  return jsonb_build_object('success', true);
+end;
+$$;
+
+-- A member's running pp_balance plus the per-slot breakdown behind it. Players may only ever
+-- see their own (p_target_member_id is ignored/forced to self); owner/accountant can audit
+-- any player in their org by passing p_target_member_id.
+create or replace function get_member_pp(p_passcode text, p_member_id uuid, p_password text, p_target_member_id uuid default null)
+returns jsonb
+language plpgsql security definer as $$
+declare
+  v_role text; v_org_id uuid;
+  v_target uuid;
+  v_balance numeric;
+  v_breakdown jsonb;
+begin
+  select rc.role, rc.org_id into v_role, v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
+  if v_org_id is null then
+    raise exception 'not authorized';
+  end if;
+  if v_role = 'player' then
+    v_target := p_member_id;
+  else
+    v_target := coalesce(p_target_member_id, p_member_id);
+  end if;
+  if v_target is null or not exists(select 1 from members where id = v_target and org_id = v_org_id) then
+    raise exception 'invalid member';
+  end if;
+
+  select pp_balance into v_balance from members where id = v_target;
+  select coalesce(jsonb_agg(jsonb_build_object(
+      'slot_id', s.id, 'slot_date', s.slot_date, 'lobby_type', s.lobby_type,
+      'tournament_name', s.tournament_name, 'team_name', coalesce(t.name,''),
+      'share_amount', sp.share_amount
+    ) order by s.slot_date desc), '[]'::jsonb)
+    into v_breakdown
+  from slot_participants sp
+  join slots s on s.id = sp.slot_id
+  left join teams t on t.id = s.team_id
+  where sp.member_id = v_target;
+
+  return jsonb_build_object('balance', v_balance, 'breakdown', v_breakdown);
 end;
 $$;
 
@@ -765,6 +950,10 @@ begin
     delete from transactions where slot_id = p_slot_id and type = 'income';
   end if;
 
+  -- Cost/prize may have just changed, so re-split this slot's net across whoever is
+  -- currently marked as having played it.
+  perform recompute_slot_pp(p_slot_id);
+
   return true;
 end;
 $$;
@@ -777,6 +966,11 @@ declare
 begin
   select rc.role, rc.org_id into v_role, v_org_id from resolve_caller(p_passcode, p_member_id, p_password) rc;
   if v_role not in ('owner','accountant') then return false; end if;
+  -- Reverse this slot's pp contribution before it (and its slot_participants rows, via
+  -- cascade) disappear, so deleting a slot doesn't leave stale money in players' balances.
+  update members m set pp_balance = m.pp_balance - sp.share_amount
+  from slot_participants sp
+  where sp.slot_id = p_slot_id and m.id = sp.member_id;
   -- Remove the slot's auto-posted expense/prize transactions too, so deleting a slot doesn't
   -- leave orphaned money entries behind in the finance ledger.
   delete from transactions where slot_id = p_slot_id and org_id = v_org_id;

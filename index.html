@@ -622,6 +622,7 @@ const PLAYER_NAV = [
   ['slots','slots','Slots & Lobbies'],
   ['finance','finance','Finance'],
   ['analytics','analytics','Analytics'],
+  ['mysplit','wallet','My Split'],
 ];
 
 function renderShell(){
@@ -808,9 +809,17 @@ function bindSlots(){
   });
 }
 
-function openSlotModal(slot){
+async function openSlotModal(slot){
   const isNew = !slot;
   const teamOptions = slotsData.teams.map(t => `<option value="${t.id}" ${!isNew && slot.team_id===t.id ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('');
+  let teamPlayers = [], participants = [];
+  if (!isNew && slot.team_id){
+    [teamPlayers, participants] = await Promise.all([
+      rpc('list_team_players', { ...authTriple(), p_team_id: slot.team_id }),
+      rpc('get_slot_participants', { ...authTriple(), p_slot_id: slot.id })
+    ]);
+  }
+  const participantIds = new Set(participants.map(p => p.member_id));
   openModal(`
     <div class="modal-panel">
       <div class="modal-head"><h3>${isNew ? 'Add Slot' : 'Edit Slot'}</h3><button class="modal-close">${icon('close')}</button></div>
@@ -853,7 +862,21 @@ function openSlotModal(slot){
           <span class="lbl" id="wonPrizeLabel">Won a prize</span>
         </label>
         <label class="field"><span class="lbl" id="prizeAmountLabel">Prize amount (₹)</span><input type="number" name="prize_amount" id="prizeAmountInput" min="0" value="${slot.prize_amount || 0}" ${slot.won_prize ? '' : 'disabled'}></label>
-        ` : `<p class="hint">Match result fields can be entered once you edit this slot after it's played.</p>`}
+        <div class="field-divider"><span>Who played (split)</span></div>
+        <input type="hidden" id="participantsTeamId" value="${slot.team_id || ''}">
+        ${!slot.team_id ? `<p class="hint">Assign a team to this slot to track each player's split.</p>`
+          : teamPlayers.length ? `
+        <div id="participantsWrap" style="display:flex;flex-direction:column;gap:8px;margin-bottom:6px">
+          ${teamPlayers.map(p => `
+          <label class="field checkbox-field">
+            <input type="checkbox" name="participant" value="${p.id}" ${participantIds.has(p.id) ? 'checked' : ''}>
+            <span class="lbl">${escapeHtml(p.name)}</span>
+          </label>`).join('')}
+        </div>
+        <p class="hint" id="splitPreview">Only checked players share this slot's net result.</p>
+        <p class="hint" id="teamChangedHint" style="display:none">Team changed — save, then reopen this slot to set who played.</p>
+        ` : `<p class="hint">No players on this slot's team yet — add them in Members to track their split.</p>`}
+        ` : `<p class="hint">Match result and player split can be entered once you edit this slot after it's played.</p>`}
         <button class="btn btn-primary btn-block" type="submit">${isNew ? 'Create slot' : 'Save changes'}</button>
       </form>
     </div>`);
@@ -869,20 +892,59 @@ function openSlotModal(slot){
       });
       if (res.success) { toast('Slot created', 'success'); closeModal(); renderRoute(); } else toast(res.error || 'Could not create', 'error');
     } else {
+      const newTeamId = fd.get('team_id') || null;
       const ok = await rpc('update_slot', {
-        ...authTriple(), p_slot_id: slot.id, p_team_id: fd.get('team_id') || null, p_slot_date: fd.get('slot_date'),
+        ...authTriple(), p_slot_id: slot.id, p_team_id: newTeamId, p_slot_date: fd.get('slot_date'),
         p_start_time: fd.get('start_time') || '', p_end_time: fd.get('end_time') || '',
         p_lobby_type: fd.get('lobby_type'), p_cost: Number(fd.get('cost') || 0), p_status: fd.get('status'), p_notes: fd.get('notes') || '',
         p_placement: fd.get('placement') ? Number(fd.get('placement')) : null, p_points: Number(fd.get('points') || 0),
         p_won_prize: fd.get('won_prize') === 'on', p_prize_amount: Number(fd.get('prize_amount') || 0),
         p_tournament_name: fd.get('tournament_name') || ''
       });
-      if (ok) { toast('Slot updated', 'success'); closeModal(); renderRoute(); }
+      if (ok){
+        // Only push the participant checkboxes if the team is still the one they were
+        // loaded against — otherwise they reflect the old team's roster, not the new one.
+        if (newTeamId && newTeamId === document.getElementById('participantsTeamId').value){
+          const participantIds = Array.from(document.querySelectorAll('[name=participant]:checked')).map(el => el.value);
+          if (document.getElementById('participantsWrap')){
+            await rpc('owner_set_slot_participants', { ...authTriple(), p_slot_id: slot.id, p_participant_ids: participantIds });
+          }
+        }
+        toast('Slot updated', 'success'); closeModal(); renderRoute();
+      }
     }
   };
   const wonPrizeCheck = document.getElementById('wonPrizeCheck');
+  const prizeAmountInput = document.getElementById('prizeAmountInput');
+  const costInput = document.querySelector('[name=cost]');
+  const splitPreview = document.getElementById('splitPreview');
+  const teamSelect = document.querySelector('[name=team_id]');
+  const participantsWrap = document.getElementById('participantsWrap');
+  const teamChangedHint = document.getElementById('teamChangedHint');
+  function updateSplitPreview(){
+    if (!splitPreview) return;
+    const cost = Number((costInput && costInput.value) || 0);
+    const prize = (wonPrizeCheck && wonPrizeCheck.checked) ? Number((prizeAmountInput && prizeAmountInput.value) || 0) : 0;
+    const checked = document.querySelectorAll('[name=participant]:checked').length;
+    if (!checked){ splitPreview.textContent = 'Select who played to preview their split.'; return; }
+    const net = prize - cost;
+    const share = net / checked;
+    const sign = share > 0 ? '+' : share < 0 ? '−' : '';
+    splitPreview.textContent = `Net ${money(net)} ÷ ${checked} player${checked > 1 ? 's' : ''} = ${sign}${money(Math.abs(share))} each`;
+  }
   if (wonPrizeCheck) wonPrizeCheck.onchange = () => {
-    document.getElementById('prizeAmountInput').disabled = !wonPrizeCheck.checked;
+    prizeAmountInput.disabled = !wonPrizeCheck.checked;
+    updateSplitPreview();
+  };
+  if (costInput) costInput.oninput = updateSplitPreview;
+  if (prizeAmountInput) prizeAmountInput.oninput = updateSplitPreview;
+  document.querySelectorAll('[name=participant]').forEach(cb => cb.onchange = updateSplitPreview);
+  updateSplitPreview();
+  if (teamSelect && teamChangedHint) teamSelect.onchange = () => {
+    const changed = teamSelect.value !== document.getElementById('participantsTeamId').value;
+    if (participantsWrap) participantsWrap.style.display = changed ? 'none' : '';
+    if (splitPreview) splitPreview.style.display = changed ? 'none' : '';
+    teamChangedHint.style.display = changed ? '' : 'none';
   };
 
   const lobbyTypeSelect = document.getElementById('lobbyTypeSelect');
@@ -1232,7 +1294,9 @@ async function renderMembers(){
       <td><span class="pill pill-${m.role}">${roleLabel(m.role)}</span></td>
       <td>${escapeHtml(m.team_name || '—')}</td>
       <td><span class="pill pill-${m.active ? 'active' : 'inactive'}">${m.active ? 'Active' : 'Inactive'}</span></td>
+      <td class="num">${m.role === 'player' ? `<span class="pill pill-${m.pp_balance >= 0 ? 'income' : 'expense'}">${m.pp_balance >= 0 ? '+' : '−'}${money(Math.abs(m.pp_balance))}</span>` : '—'}</td>
       <td style="text-align:right;white-space:nowrap">
+        ${m.role === 'player' ? `<button class="btn btn-ghost btn-sm" data-view-pp="${m.id}">${icon('wallet')}</button>` : ''}
         <button class="btn btn-ghost btn-sm" data-edit-mem="${m.id}">${icon('edit')}</button>
         <button class="btn btn-ghost btn-sm" data-reset-mem="${m.id}">${icon('key')}</button>
         <button class="btn btn-ghost btn-sm" data-del-mem="${m.id}">${icon('trash')}</button>
@@ -1245,8 +1309,8 @@ async function renderMembers(){
   </div>
   <div class="card table-card">
     <div class="table-wrap"><table>
-      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Team</th><th>Status</th><th></th></tr></thead>
-      <tbody>${rows || '<tr class="empty-row"><td colspan="6">No members yet.</td></tr>'}</tbody>
+      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Team</th><th>Status</th><th>Split</th><th></th></tr></thead>
+      <tbody>${rows || '<tr class="empty-row"><td colspan="7">No members yet.</td></tr>'}</tbody>
     </table></div>
   </div>`;
 }
@@ -1255,6 +1319,7 @@ function bindMembers(){
   document.getElementById('addMemBtn').onclick = () => openMemberModal(null);
   document.querySelectorAll('[data-edit-mem]').forEach(b => b.onclick = () => openMemberModal(membersPageData.find(m => m.id === b.dataset.editMem)));
   document.querySelectorAll('[data-reset-mem]').forEach(b => b.onclick = () => openResetPasswordModal(b.dataset.resetMem));
+  document.querySelectorAll('[data-view-pp]').forEach(b => b.onclick = () => openMemberPpModal(membersPageData.find(m => m.id === b.dataset.viewPp)));
   document.querySelectorAll('[data-del-mem]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this member account? This cannot be undone.')) return;
     const ok = await rpc('owner_delete_member', { p_passcode: session.passcode, p_member_id: b.dataset.delMem });
@@ -1324,6 +1389,47 @@ function openResetPasswordModal(memberId){
 }
 
 // ============================================================
+// Player split (PP) — a player's own view, and the owner/accountant audit modal
+// ============================================================
+function ppBreakdownHtml(pp){
+  const rows = pp.breakdown.map(b => `
+    <tr>
+      <td>${fmtDate(b.slot_date)}</td>
+      <td>${escapeHtml(b.team_name || '—')}</td>
+      <td>${escapeHtml(b.lobby_type === 'tournament' && b.tournament_name ? b.tournament_name : statusLabel(b.lobby_type))}</td>
+      <td class="num"><span class="pill pill-${b.share_amount >= 0 ? 'income' : 'expense'}">${b.share_amount >= 0 ? '+' : '−'}${money(Math.abs(b.share_amount))}</span></td>
+    </tr>`).join('');
+  return `
+  <div class="table-wrap"><table>
+    <thead><tr><th>Date</th><th>Team</th><th>Lobby</th><th>Share</th></tr></thead>
+    <tbody>${rows || `<tr class="empty-row"><td colspan="4">No played slots recorded yet.</td></tr>`}</tbody>
+  </table></div>`;
+}
+
+async function renderMySplit(){
+  const pp = await rpc('get_member_pp', authTriple());
+  return `
+  <div class="grid grid-4" style="margin-bottom:16px">
+    <div class="card stat-tile">
+      <div class="icon-badge">${icon('wallet')}</div>
+      <div class="label">Your Split Balance</div>
+      <div class="value num">${money(pp.balance)}</div>
+    </div>
+  </div>
+  <div class="card table-card">${ppBreakdownHtml(pp)}</div>`;
+}
+
+async function openMemberPpModal(member){
+  const pp = await rpc('get_member_pp', { ...authTriple(), p_target_member_id: member.id });
+  openModal(`
+    <div class="modal-panel">
+      <div class="modal-head"><h3>${escapeHtml(member.name)}'s split</h3><button class="modal-close">${icon('close')}</button></div>
+      <p class="hint" style="margin-top:-6px">Balance: <strong>${money(pp.balance)}</strong></p>
+      <div class="card table-card" style="box-shadow:none;border:1px solid var(--border)">${ppBreakdownHtml(pp)}</div>
+    </div>`);
+}
+
+// ============================================================
 // Routes
 // ============================================================
 const ROUTES = {
@@ -1333,6 +1439,7 @@ const ROUTES = {
   analytics: { title: () => 'Analytics', sub: () => 'Lobby performance & suggested cost range', render: renderAnalytics, bind: bindAnalytics },
   teams: { title: () => 'Teams', sub: () => 'Rosters in the org', render: renderTeams, bind: bindTeams },
   members: { title: () => 'Members', sub: () => 'Accountant & player accounts', render: renderMembers, bind: bindMembers },
+  mysplit: { title: () => 'My Split', sub: () => 'Your share of each tournament\'s result', render: renderMySplit },
 };
 
 document.addEventListener('DOMContentLoaded', render);
