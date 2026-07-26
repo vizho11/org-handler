@@ -618,6 +618,7 @@ const OWNER_NAV = [
   ['slots','slots','Slots & Lobbies'],
   ['finance','finance','Finance'],
   ['analytics','analytics','Analytics'],
+  ['playersplits','wallet','Player Splits'],
   ['teams','teams','Teams'],
   ['members','members','Members'],
 ];
@@ -1485,6 +1486,39 @@ async function openMemberPpModal(member){
 }
 
 // ============================================================
+// Player Splits (owner) — every player's running PP balance in one place
+// ============================================================
+let playerSplitsData = [];
+
+async function renderPlayerSplits(){
+  const members = await rpc('owner_list_members', { p_passcode: session.passcode });
+  const players = members.filter(m => m.role === 'player');
+  playerSplitsData = players;
+  const rows = players.map(m => `
+    <tr>
+      <td>${escapeHtml(m.name)}</td>
+      <td>${escapeHtml(m.team_name || '—')}</td>
+      <td><span class="pill pill-${m.active ? 'active' : 'inactive'}">${m.active ? 'Active' : 'Inactive'}</span></td>
+      <td class="num"><span class="pill pill-${m.pp_balance >= 0 ? 'income' : 'expense'}">${m.pp_balance >= 0 ? '+' : '−'}${money(Math.abs(m.pp_balance))}</span></td>
+      <td style="text-align:right"><button class="btn btn-ghost btn-sm" data-view-split="${m.id}">${icon('wallet')} View</button></td>
+    </tr>`).join('');
+  return `
+  <div class="section-head">
+    <h2>Player Splits</h2>
+  </div>
+  <div class="card table-card">
+    <div class="table-wrap"><table>
+      <thead><tr><th>Player</th><th>Team</th><th>Status</th><th>Balance</th><th></th></tr></thead>
+      <tbody>${rows || `<tr class="empty-row"><td colspan="5">No player accounts yet — add one from Members.</td></tr>`}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function bindPlayerSplits(){
+  document.querySelectorAll('[data-view-split]').forEach(b => b.onclick = () => openMemberPpModal(playerSplitsData.find(m => m.id === b.dataset.viewSplit)));
+}
+
+// ============================================================
 // Routes
 // ============================================================
 const ROUTES = {
@@ -1492,6 +1526,7 @@ const ROUTES = {
   slots: { title: () => 'Slots & Lobbies', sub: () => 'Purchased scrim/tournament slots by team', render: renderSlots, bind: bindSlots },
   finance: { title: () => 'Finance', sub: () => 'Income, expenses & balance', render: renderFinance, bind: bindFinance },
   analytics: { title: () => 'Analytics', sub: () => 'Lobby performance & suggested cost range', render: renderAnalytics, bind: bindAnalytics },
+  playersplits: { title: () => 'Player Splits', sub: () => 'Every player\'s running balance from tournament results', render: renderPlayerSplits, bind: bindPlayerSplits },
   teams: { title: () => 'Teams', sub: () => 'Rosters in the org', render: renderTeams, bind: bindTeams },
   members: { title: () => 'Members', sub: () => 'Accountant & player accounts', render: renderMembers, bind: bindMembers },
   mysplit: { title: () => 'My Split', sub: () => 'Your share of each tournament\'s result', render: renderMySplit },
