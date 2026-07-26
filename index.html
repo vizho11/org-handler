@@ -501,8 +501,8 @@ function renderLogin(){
         <button class="btn btn-primary btn-block" type="submit">Sign in as owner</button>
       </form>` : `
       <form id="memberLoginForm">
-        <label class="field"><span class="lbl">Email</span>
-          <input type="email" name="email" required autocomplete="username">
+        <label class="field"><span class="lbl">Phone number</span>
+          <input type="tel" name="phone" required autocomplete="username">
         </label>
         <label class="field"><span class="lbl">Password</span>
           <input type="password" name="password" required autocomplete="current-password">
@@ -526,10 +526,10 @@ function bindLogin(){
     const btn = memForm.querySelector('button');
     btn.disabled = true;
     try {
-      const data = await rpc('member_login', { p_email: fd.get('email'), p_password: fd.get('password') });
+      const data = await rpc('member_login', { p_phone: fd.get('phone'), p_password: fd.get('password') });
       if (!data.success){
-        errEl().textContent = data.error === 'wrong_password' ? 'Incorrect email or password.'
-          : data.error === 'no_account' ? 'No account with that email.'
+        errEl().textContent = data.error === 'wrong_password' ? 'Incorrect phone number or password.'
+          : data.error === 'no_account' ? 'No account with that phone number.'
           : data.error === 'account_inactive' ? 'This account has been deactivated.'
           : data.error === 'too_many_attempts' ? 'Too many attempts — try again in a few minutes.'
           : 'Could not sign in.';
@@ -1396,7 +1396,7 @@ async function renderMembers(){
   const rows = members.map(m => `
     <tr>
       <td>${escapeHtml(m.name)}</td>
-      <td>${escapeHtml(m.email)}</td>
+      <td>${escapeHtml(m.ign || '—')}</td>
       <td><span class="pill pill-${m.role}">${roleLabel(m.role)}</span></td>
       <td>${escapeHtml(m.team_name || '—')}</td>
       <td><span class="pill pill-${m.active ? 'active' : 'inactive'}">${m.active ? 'Active' : 'Inactive'}</span></td>
@@ -1415,7 +1415,7 @@ async function renderMembers(){
   </div>
   <div class="card table-card">
     <div class="table-wrap"><table>
-      <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Team</th><th>Status</th><th>Split</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>IGN</th><th>Role</th><th>Team</th><th>Status</th><th>Split</th><th></th></tr></thead>
       <tbody>${rows || '<tr class="empty-row"><td colspan="7">No members yet.</td></tr>'}</tbody>
     </table></div>
   </div>`;
@@ -1440,21 +1440,20 @@ function openMemberModal(member){
     <div class="modal-panel">
       <div class="modal-head"><h3>${isNew ? 'Add Member' : 'Edit Member'}</h3><button class="modal-close">${icon('close')}</button></div>
       <form id="memForm">
+        <label class="field"><span class="lbl">IGN</span><input type="text" name="ign" required placeholder="In-game name" value="${isNew ? '' : escapeHtml(member.ign || '')}"></label>
         <label class="field"><span class="lbl">Name</span><input type="text" name="name" required value="${isNew ? '' : escapeHtml(member.name)}"></label>
-        <label class="field"><span class="lbl">Email</span><input type="email" name="email" required ${isNew ? '' : 'readonly'} value="${isNew ? '' : escapeHtml(member.email)}"></label>
-        <label class="field"><span class="lbl">Phone</span><input type="tel" name="phone" value="${isNew ? '' : escapeHtml(member.phone || '')}"></label>
+        <label class="field"><span class="lbl">Number</span><input type="tel" name="phone" required value="${isNew ? '' : escapeHtml(member.phone || '')}"></label>
         <label class="field"><span class="lbl">Role</span>
           <select name="role">
             <option value="player" ${!isNew && member.role==='player' ? 'selected' : ''}>Player (view only)</option>
             <option value="accountant" ${!isNew && member.role==='accountant' ? 'selected' : ''}>Accountant (edit)</option>
           </select>
         </label>
-        <label class="field"><span class="lbl">Team</span>
+        ${!isNew ? `<label class="field"><span class="lbl">Team</span>
           <select name="team_id"><option value="">— None —</option>${teamOptions}</select>
         </label>
-        ${isNew ? `<label class="field"><span class="lbl">Initial password</span><input type="text" name="password" required></label>
-        <p class="hint" style="margin-top:-10px;margin-bottom:14px">Shown only once here — copy it and share with them directly.</p>` : ''}
-        ${!isNew ? `<label class="field"><span class="lbl">Status</span><select name="active"><option value="true" ${member.active ? 'selected' : ''}>Active</option><option value="false" ${!member.active ? 'selected' : ''}>Inactive</option></select></label>` : ''}
+        <label class="field"><span class="lbl">Status</span><select name="active"><option value="true" ${member.active ? 'selected' : ''}>Active</option><option value="false" ${!member.active ? 'selected' : ''}>Inactive</option></select></label>` : `
+        <p class="hint" style="margin-top:-10px">Team can be assigned after creation, from this same Edit form. A temporary password is generated for you to share.</p>`}
         <button class="btn btn-primary btn-block" type="submit">${isNew ? 'Create member' : 'Save changes'}</button>
       </form>
     </div>`);
@@ -1463,18 +1462,33 @@ function openMemberModal(member){
     const fd = new FormData(e.target);
     if (isNew){
       const res = await rpc('owner_create_member', {
-        p_passcode: session.passcode, p_name: fd.get('name'), p_email: fd.get('email'), p_phone: fd.get('phone') || '',
-        p_password: fd.get('password'), p_role: fd.get('role'), p_team_id: fd.get('team_id') || null
+        p_passcode: session.passcode, p_name: fd.get('name'), p_ign: fd.get('ign'), p_phone: fd.get('phone'), p_role: fd.get('role')
       });
-      if (res.success) { toast('Member created', 'success'); closeModal(); renderRoute(); } else toast(res.error || 'Could not create', 'error');
+      if (res.success) { closeModal(); renderRoute(); openTempPasswordModal(res.password); }
+      else toast(res.error || 'Could not create', 'error');
     } else {
       const ok = await rpc('owner_update_member', {
-        p_passcode: session.passcode, p_member_id: member.id, p_name: fd.get('name'), p_phone: fd.get('phone') || '',
+        p_passcode: session.passcode, p_member_id: member.id, p_name: fd.get('name'), p_ign: fd.get('ign'), p_phone: fd.get('phone') || '',
         p_role: fd.get('role'), p_team_id: fd.get('team_id') || null, p_active: fd.get('active') === 'true'
       });
       if (ok) { toast('Member updated', 'success'); closeModal(); renderRoute(); }
     }
   };
+}
+
+function openTempPasswordModal(password){
+  openModal(`
+    <div class="modal-panel">
+      <div class="modal-head"><h3>Member created</h3><button class="modal-close">${icon('close')}</button></div>
+      <p class="hint" style="margin-top:-6px">Temporary password — copy it and share it with them now. It won't be shown again; reset it later from the key icon if needed.</p>
+      <div style="display:flex;gap:8px;align-items:center;margin:14px 0 4px">
+        <div style="flex:1;font-family:monospace;font-size:17px;letter-spacing:0.04em;padding:10px 12px;background:var(--surface-sunken);border-radius:8px;border:1px solid var(--border)">${escapeHtml(password)}</div>
+        <button class="btn btn-secondary btn-sm" id="copyTempPass">Copy</button>
+      </div>
+      <button class="btn btn-primary btn-block" id="doneTempPass" style="margin-top:16px">Done</button>
+    </div>`);
+  document.getElementById('copyTempPass').onclick = () => { navigator.clipboard.writeText(password); toast('Copied', 'success'); };
+  document.getElementById('doneTempPass').onclick = closeModal;
 }
 
 function openResetPasswordModal(memberId){

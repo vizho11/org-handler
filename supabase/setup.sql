@@ -139,6 +139,16 @@ alter table slots add column if not exists org_id uuid references orgs(id) on de
 alter table transactions add column if not exists org_id uuid references orgs(id) on delete cascade;
 alter table members add column if not exists pp_balance numeric not null default 0;
 
+-- Login switched from email+password to phone+password: phone is now the identifier the
+-- member form asks for (owner/accountant/player creation asks for ign, name, phone, role
+-- only — see owner_create_member). email stays on the table for any historical rows but is
+-- no longer required or unique going forward; phone gets a partial unique index instead of a
+-- hard not-null+unique constraint so existing blank-phone rows don't break this migration.
+alter table members add column if not exists ign text not null default '';
+alter table members alter column email drop not null;
+alter table members drop constraint if exists members_email_key;
+create unique index if not exists members_phone_unique_idx on members(phone) where phone <> '';
+
 do $$
 declare
   v_default_org_id uuid;
@@ -430,20 +440,20 @@ $$;
 
 -- Member auth (accountant / player) -------------------------------------------------------
 
-create or replace function member_login(p_email text, p_password text)
+create or replace function member_login(p_phone text, p_password text)
 returns jsonb
 language plpgsql security definer as $$
 declare
-  v_email text := lower(trim(p_email));
+  v_phone text := trim(p_phone);
   v_m members%rowtype;
-  v_target text := 'mem:' || v_email;
+  v_target text := 'mem:' || v_phone;
   v_team_name text;
   v_org_active boolean;
 begin
   if not check_rate_limit(v_target) then
     return jsonb_build_object('success', false, 'error', 'too_many_attempts');
   end if;
-  select * into v_m from members where lower(email) = v_email;
+  select * into v_m from members where phone = v_phone and v_phone <> '';
   if not found then
     perform record_auth_attempt(v_target);
     return jsonb_build_object('success', false, 'error', 'no_account');
@@ -458,7 +468,7 @@ begin
   if v_m.password_hash = crypt(p_password, v_m.password_hash) then
     select name into v_team_name from teams where id = v_m.team_id;
     return jsonb_build_object('success', true, 'member', jsonb_build_object(
-      'id', v_m.id, 'name', v_m.name, 'email', v_m.email, 'phone', v_m.phone,
+      'id', v_m.id, 'name', v_m.name, 'ign', v_m.ign, 'phone', v_m.phone,
       'role', v_m.role, 'team_id', v_m.team_id, 'team_name', coalesce(v_team_name, '')
     ));
   else
@@ -524,11 +534,11 @@ $$;
 -- Members management (org-owner-only writes, scoped to the caller's org)
 -- ============================================================
 
--- Return columns grew (pp_balance) -- create or replace can't change a function's return
--- type, so the old signature has to be dropped first.
+-- Return columns changed (email -> ign) -- create or replace can't change a function's
+-- return type, so the old signature has to be dropped first.
 drop function if exists owner_list_members(text);
 create or replace function owner_list_members(p_passcode text)
-returns table(id uuid, name text, email text, phone text, role text, team_id uuid, team_name text,
+returns table(id uuid, name text, ign text, phone text, role text, team_id uuid, team_name text,
               active boolean, created_at timestamptz, pp_balance numeric)
 language plpgsql security definer as $$
 declare
@@ -538,21 +548,27 @@ begin
     raise exception 'invalid owner passcode';
   end if;
   return query
-    select m.id, m.name, m.email, m.phone, m.role, m.team_id, coalesce(t.name,''), m.active, m.created_at, m.pp_balance
+    select m.id, m.name, m.ign, m.phone, m.role, m.team_id, coalesce(t.name,''), m.active, m.created_at, m.pp_balance
     from members m left join teams t on t.id = m.team_id
     where m.org_id = v_org_id
     order by m.created_at desc;
 end;
 $$;
 
+-- Parameter list shrank (email/password/team_id dropped, ign added) -- the old 7-arg
+-- signature has to go first or it'd linger as a separate overload alongside this one.
+-- The form now only asks for ign, name, phone, and role — team is assigned later via
+-- owner_update_member, and the password is auto-generated here (returned once) instead of
+-- typed in, so creating a player is a four-field, no-typing-a-password affair.
+drop function if exists owner_create_member(text, text, text, text, text, text, uuid);
 create or replace function owner_create_member(
-  p_passcode text, p_name text, p_email text, p_phone text, p_password text,
-  p_role text, p_team_id uuid
+  p_passcode text, p_name text, p_ign text, p_phone text, p_role text
 ) returns jsonb
 language plpgsql security definer as $$
 declare
   v_org_id uuid := org_owner_verify_passcode(p_passcode);
-  v_email text := lower(trim(p_email));
+  v_phone text := trim(p_phone);
+  v_password text;
   v_id uuid;
 begin
   if v_org_id is null then
@@ -561,32 +577,42 @@ begin
   if p_role not in ('accountant','player') then
     return jsonb_build_object('success', false, 'error', 'invalid role');
   end if;
-  if exists(select 1 from members where lower(email) = v_email) then
-    return jsonb_build_object('success', false, 'error', 'An account with this email already exists.');
+  if p_name is null or trim(p_name) = '' then
+    return jsonb_build_object('success', false, 'error', 'name required');
   end if;
-  if p_team_id is not null and not exists(select 1 from teams where id = p_team_id and org_id = v_org_id) then
-    return jsonb_build_object('success', false, 'error', 'invalid team');
+  if v_phone = '' then
+    return jsonb_build_object('success', false, 'error', 'phone number required');
   end if;
-  insert into members (org_id, name, email, phone, password_hash, role, team_id)
-    values (v_org_id, trim(p_name), v_email, coalesce(p_phone,''), crypt(p_password, gen_salt('bf')), p_role, p_team_id)
+  if exists(select 1 from members where phone = v_phone) then
+    return jsonb_build_object('success', false, 'error', 'An account with this phone number already exists.');
+  end if;
+  v_password := substr(md5(gen_random_uuid()::text), 1, 8);
+  insert into members (org_id, name, ign, phone, password_hash, role, team_id)
+    values (v_org_id, trim(p_name), coalesce(trim(p_ign),''), v_phone, crypt(v_password, gen_salt('bf')), p_role, null)
     returning id into v_id;
-  return jsonb_build_object('success', true, 'id', v_id, 'email', v_email);
+  return jsonb_build_object('success', true, 'id', v_id, 'password', v_password);
 end;
 $$;
 
+-- Parameter list grew (ign added) -- drop the old 7-arg signature first, same reason as above.
+drop function if exists owner_update_member(text, uuid, text, text, text, uuid, boolean);
 create or replace function owner_update_member(
-  p_passcode text, p_member_id uuid, p_name text, p_phone text, p_role text, p_team_id uuid, p_active boolean
+  p_passcode text, p_member_id uuid, p_name text, p_ign text, p_phone text, p_role text, p_team_id uuid, p_active boolean
 ) returns boolean
 language plpgsql security definer as $$
 declare
   v_org_id uuid := org_owner_verify_passcode(p_passcode);
+  v_phone text := trim(p_phone);
 begin
   if v_org_id is null then return false; end if;
   if p_role not in ('accountant','player') then return false; end if;
   if p_team_id is not null and not exists(select 1 from teams where id = p_team_id and org_id = v_org_id) then
     return false;
   end if;
-  update members set name = trim(p_name), phone = coalesce(p_phone,''), role = p_role,
+  if v_phone <> '' and exists(select 1 from members where phone = v_phone and id <> p_member_id) then
+    return false;
+  end if;
+  update members set name = trim(p_name), ign = coalesce(trim(p_ign),''), phone = v_phone, role = p_role,
     team_id = p_team_id, active = p_active
   where id = p_member_id and org_id = v_org_id;
   return found;
