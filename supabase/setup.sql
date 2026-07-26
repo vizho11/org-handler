@@ -555,20 +555,19 @@ begin
 end;
 $$;
 
--- Parameter list shrank (email/password/team_id dropped, ign added) -- the old 7-arg
--- signature has to go first or it'd linger as a separate overload alongside this one.
--- The form now only asks for ign, name, phone, and role — team is assigned later via
--- owner_update_member, and the password is auto-generated here (returned once) instead of
--- typed in, so creating a player is a four-field, no-typing-a-password affair.
+-- Parameter list changed (email/team_id dropped, ign added, password stays but the owner
+-- types it now instead of it being optional) -- the old 7-arg and 5-arg signatures both have
+-- to go first or they'd linger as separate overloads alongside this one. The form asks for
+-- ign, name, phone, passcode, and role — team is assigned later via owner_update_member.
 drop function if exists owner_create_member(text, text, text, text, text, text, uuid);
+drop function if exists owner_create_member(text, text, text, text, text);
 create or replace function owner_create_member(
-  p_passcode text, p_name text, p_ign text, p_phone text, p_role text
+  p_passcode text, p_name text, p_ign text, p_phone text, p_password text, p_role text
 ) returns jsonb
 language plpgsql security definer as $$
 declare
   v_org_id uuid := org_owner_verify_passcode(p_passcode);
   v_phone text := trim(p_phone);
-  v_password text;
   v_id uuid;
 begin
   if v_org_id is null then
@@ -583,14 +582,16 @@ begin
   if v_phone = '' then
     return jsonb_build_object('success', false, 'error', 'phone number required');
   end if;
+  if p_password is null or length(p_password) < 4 then
+    return jsonb_build_object('success', false, 'error', 'passcode must be at least 4 characters');
+  end if;
   if exists(select 1 from members where phone = v_phone) then
     return jsonb_build_object('success', false, 'error', 'An account with this phone number already exists.');
   end if;
-  v_password := substr(md5(gen_random_uuid()::text), 1, 8);
   insert into members (org_id, name, ign, phone, password_hash, role, team_id)
-    values (v_org_id, trim(p_name), coalesce(trim(p_ign),''), v_phone, crypt(v_password, gen_salt('bf')), p_role, null)
+    values (v_org_id, trim(p_name), coalesce(trim(p_ign),''), v_phone, crypt(p_password, gen_salt('bf')), p_role, null)
     returning id into v_id;
-  return jsonb_build_object('success', true, 'id', v_id, 'password', v_password);
+  return jsonb_build_object('success', true, 'id', v_id);
 end;
 $$;
 
