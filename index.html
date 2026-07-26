@@ -243,6 +243,7 @@
     background: var(--surface-sunken); border: none; color: var(--ink-secondary); padding: 8px;
     border-radius: 8px; flex-shrink: 0; display: flex;
   }
+  .modal-close svg { width: 16px; height: 16px; }
   .modal-close:hover { background: var(--border-strong); color: var(--ink-primary); }
 
   .toast-stack { position: fixed; bottom: 20px; right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
@@ -387,6 +388,11 @@ function fmtDate(d){ if(!d) return '—'; const dt = new Date(d); return dt.toLo
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function initials(name){ return (name||'?').trim().split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase(); }
 function statusLabel(s){ return (s||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase()); }
+// A completed BR/scrim slot with no placement means the result was never entered.
+// Clash Squad has no placement by design, so it can't be detected this way.
+function slotNeedsResult(s){
+  return s.status === 'completed' && s.lobby_type !== 'clash_squad' && s.placement == null;
+}
 function lobbyTypeLabel(s){ return (s.lobby_type === 'tournament' && s.tournament_name) ? s.tournament_name : statusLabel(s.lobby_type); }
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function roleLabel(r){ return r === 'owner' ? 'Owner' : r === 'accountant' ? 'Accountant' : 'Player'; }
@@ -476,6 +482,9 @@ function renderLogin(){
       </div>
       ${loginTab === 'owner' ? `
       <form id="ownerLoginForm">
+      <label class="field"><span class="lbl">Org name</span>
+          <input type="text" name="orgname" required>
+        </label>
         <label class="field"><span class="lbl">Owner passcode</span>
           <input type="password" name="passcode" required autocomplete="current-password">
         </label>
@@ -531,7 +540,7 @@ function bindLogin(){
     const btn = ownerForm.querySelector('button');
     btn.disabled = true;
     try {
-      const orgId = await rpc('org_owner_verify_passcode', { p_passcode: fd.get('passcode') });
+     const orgId = await rpc('org_owner_login', { p_org_name: fd.get('orgname'), p_passcode: fd.get('passcode') });
       if (!orgId){
         errEl().textContent = 'Incorrect passcode.';
         errEl().style.display = 'block';
@@ -766,7 +775,10 @@ async function renderSlots(){
   const [slots, teams] = await Promise.all([fetchSlots(), fetchTeams()]);
   slotsData = { slots, teams };
   teamsCache = teams;
-  const filtered = slotFilter === 'all' ? slots : slots.filter(s => s.status === slotFilter);
+  const filtered = slotFilter === 'all' ? slots
+    : slotFilter === 'needs_result' ? slots.filter(slotNeedsResult)
+    : slots.filter(s => s.status === slotFilter);
+  const pendingResults = slots.filter(slotNeedsResult).length;
   const rows = filtered.map(s => `
     <tr>
       <td>${fmtDate(s.slot_date)}</td>
@@ -774,9 +786,9 @@ async function renderSlots(){
       <td>${s.start_time ? escapeHtml(s.start_time) + (s.end_time ? '–' + escapeHtml(s.end_time) : '') : '—'}</td>
       <td>${escapeHtml(lobbyTypeLabel(s))}</td>
       <td class="num">${money(s.cost)}</td>
-      <td><span class="pill pill-${s.status}">${statusLabel(s.status)}</span></td>
+      <td><span class="pill pill-${s.status}">${statusLabel(s.status)}</span>${slotNeedsResult(s) ? ' <span class="pill" style="background:var(--warning-bg);color:var(--warning)">Result needed</span>' : ''}</td>
       ${canEdit() ? `<td style="text-align:right;white-space:nowrap">
-        <button class="btn btn-ghost btn-sm" data-edit-slot="${s.id}">${icon('edit')}</button>
+        <button class="btn ${slotNeedsResult(s) ? 'btn-primary' : 'btn-ghost'} btn-sm" data-edit-slot="${s.id}">${slotNeedsResult(s) ? 'Add result' : icon('edit')}</button>
         <button class="btn btn-ghost btn-sm" data-del-slot="${s.id}">${icon('trash')}</button>
       </td>` : ''}
     </tr>`).join('');
@@ -786,8 +798,16 @@ async function renderSlots(){
     <h2>Slots &amp; Lobbies</h2>
     ${canEdit() ? `<button class="btn btn-primary" id="addSlotBtn">${icon('plus')} Add Slot</button>` : ''}
   </div>
+  ${pendingResults && canEdit() ? `
+  <div class="card" style="margin-bottom:16px;border-left:3px solid var(--warning)">
+    <p style="margin:0;font-size:14px;line-height:1.6">
+      <b>${pendingResults} completed ${pendingResults === 1 ? 'lobby has' : 'lobbies have'} no result entered.</b>
+      Analytics can't tell you which price range is worth playing until placement and points are in.
+      <button class="btn btn-ghost btn-sm" id="showPendingResults" style="margin-left:6px">Show ${pendingResults === 1 ? 'it' : 'them'}</button>
+    </p>
+  </div>` : ''}
   <div class="filter-bar">
-    ${['all','booked','completed','cancelled'].map(f => `<button class="filter-chip ${slotFilter===f?'active':''}" data-filter="${f}">${f==='all'?'All':statusLabel(f)}</button>`).join('')}
+    ${['all','booked','completed','cancelled','needs_result'].map(f => `<button class="filter-chip ${slotFilter===f?'active':''}" data-filter="${f}">${f==='all'?'All':f==='needs_result'?'Needs result':statusLabel(f)}</button>`).join('')}
   </div>
   <div class="card table-card">
     <div class="table-wrap"><table>
@@ -801,6 +821,8 @@ function bindSlots(){
   document.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => { slotFilter = b.dataset.filter; renderRoute(); });
   if (!canEdit()) return;
   document.getElementById('addSlotBtn').onclick = () => openSlotModal(null);
+  const pendingBtn = document.getElementById('showPendingResults');
+  if (pendingBtn) pendingBtn.onclick = () => { slotFilter = 'needs_result'; render(); };
   document.querySelectorAll('[data-edit-slot]').forEach(b => b.onclick = () => openSlotModal(slotsData.slots.find(s => s.id === b.dataset.editSlot)));
   document.querySelectorAll('[data-del-slot]').forEach(b => b.onclick = async () => {
     if (!confirm('Delete this slot? This cannot be undone.')) return;
@@ -972,7 +994,7 @@ async function openSlotModal(slot){
 // Analytics — cost-bracket performance & a suggested lobby range
 // ============================================================
 let analyticsTeamFilter = 'all';
-const ANALYTICS_MIN_SAMPLE = 2; // brackets need at least this many recorded results to count
+const ANALYTICS_CONFIDENT_SAMPLE = 8; // below this we label the read-out as an early signal
 
 function bracketOf(cost){ return Math.floor((Number(cost)||0) / 10) * 10; }
 
@@ -987,11 +1009,11 @@ function computeAnalytics(slots){
   const byBracket = new Map();
   completed.forEach(s => {
     const b = bracketOf(s.cost);
-    if (!byBracket.has(b)) byBracket.set(b, { bracket: b, played: 0, withResult: 0, top3: 0, pointsSum: 0, prize: 0, spent: 0 });
+    if (!byBracket.has(b)) byBracket.set(b, { bracket: b, played: 0, withResult: 0, top3: 0, pointsSum: 0, prize: 0, spent: 0, wins: 0 });
     const row = byBracket.get(b);
     row.played += 1;
     row.spent += Number(s.cost || 0);
-    if (s.won_prize) row.prize += Number(s.prize_amount || 0);
+    if (s.won_prize){ row.prize += Number(s.prize_amount || 0); row.wins += 1; }
     if (s.placement != null){
       row.withResult += 1;
       row.pointsSum += Number(s.points || 0);
@@ -1003,21 +1025,52 @@ function computeAnalytics(slots){
     ...r,
     top3Rate: r.withResult ? r.top3 / r.withResult : null,
     avgPoints: r.withResult ? r.pointsSum / r.withResult : null,
+    winRate: r.played ? r.wins / r.played : null,
+    net: r.prize - r.spent,
+    // How much scoring each rupee buys — comparable across brackets at any sample size.
+    pointsPer100: (r.spent > 0 && r.withResult) ? (r.pointsSum / r.spent) * 100 : null,
   })).sort((a, b) => a.bracket - b.bracket);
 
-  const eligible = brackets.filter(b => b.withResult >= ANALYTICS_MIN_SAMPLE);
+  // Split every result into "we took a prize" vs "we didn't", and compare the two.
+  const resulted = completed.filter(s => s.placement != null);
+  const wonSlots = completed.filter(s => s.won_prize);
+  const lostSlots = resulted.filter(s => !s.won_prize);
+  const avgOf = (arr, pick) => arr.length ? arr.reduce((x, s) => x + Number(pick(s) || 0), 0) / arr.length : null;
+
+  const outcome = {
+    won:  { count: wonSlots.length,  avgCost: avgOf(wonSlots,  s => s.cost), avgPoints: avgOf(wonSlots.filter(s => s.placement != null), s => s.points) },
+    lost: { count: lostSlots.length, avgCost: avgOf(lostSlots, s => s.cost), avgPoints: avgOf(lostSlots, s => s.points) },
+  };
+
+  const scored = brackets.filter(b => b.withResult > 0 || b.wins > 0);
   let suggestion = null;
-  if (eligible.length){
-    const best = eligible.slice().sort((a, b) =>
-      b.top3Rate - a.top3Rate || (b.avgPoints||0) - (a.avgPoints||0) || b.withResult - a.withResult
-    )[0];
-    const ratePct = Math.round(best.top3Rate * 100);
-    let reason = `Top 3 in ${best.top3} of ${best.withResult} (${ratePct}%) ₹${best.bracket} lobbies played — the best result rate on record`;
-    if (best.avgPoints != null) reason += `, averaging ${Math.round(best.avgPoints)} points`;
-    reason += '.';
-    const runnerUp = eligible.find(b => b.bracket !== best.bracket && b.top3Rate > 0);
-    if (runnerUp) reason += ` ₹${runnerUp.bracket} lobbies are a solid second option (${Math.round(runnerUp.top3Rate*100)}% top 3).`;
-    suggestion = { bracket: best.bracket, reason };
+
+  if (scored.length){
+    if (brackets.some(b => b.wins > 0)){
+      // We have real prize data — rank on money returned, then win rate.
+      const best = scored.slice().sort((a, b) =>
+        b.net - a.net || (b.winRate || 0) - (a.winRate || 0) || (b.pointsPer100 || 0) - (a.pointsPer100 || 0)
+      )[0];
+      let reason = '';
+      if (outcome.won.count && outcome.lost.count){
+        reason += `Prize finishes come in lobbies averaging ${money(outcome.won.avgCost)} (${outcome.won.count} of them); empty runs average ${money(outcome.lost.avgCost)} (${outcome.lost.count}). `;
+      }
+      reason += best.net >= 0
+        ? `${money(best.bracket)} lobbies are your profitable bracket — ${money(best.net)} net across ${best.played} played.`
+        : `${money(best.bracket)} lobbies lose the least of anything you've tried — ${money(best.net)} net across ${best.played} played.`;
+      suggestion = { bracket: best.bracket, reason };
+    } else {
+      // No prize anywhere yet — rank on scoring bought per rupee, which works from one result.
+      const ranked = scored.filter(b => b.pointsPer100 != null).sort((a, b) => b.pointsPer100 - a.pointsPer100);
+      if (ranked.length){
+        const best = ranked[0], worst = ranked[ranked.length - 1];
+        let reason = `No prize finishes on record yet, so this ranks on points earned per ${money(100)} spent. ${money(best.bracket)} lobbies return ${best.pointsPer100.toFixed(1)} pts per ${money(100)}, averaging ${Math.round(best.avgPoints)} points a game`;
+        if (worst.bracket !== best.bracket) reason += `, against ${worst.pointsPer100.toFixed(1)} in ${money(worst.bracket)} lobbies`;
+        reason += `. Play there while you build a win record.`;
+        suggestion = { bracket: best.bracket, reason };
+      }
+    }
+    if (suggestion) suggestion.early = resulted.length < ANALYTICS_CONFIDENT_SAMPLE;
   }
 
   return {
@@ -1027,7 +1080,7 @@ function computeAnalytics(slots){
       totalSpent, totalPrize, net: totalPrize - totalSpent,
       top3Count, top3Rate: withResult.length ? top3Count / withResult.length : null,
     },
-    brackets, suggestion,
+    brackets, suggestion, outcome,
   };
 }
 
@@ -1059,6 +1112,7 @@ async function renderAnalytics(){
       <td class="num">${b.avgPoints == null ? '—' : Math.round(b.avgPoints)}</td>
       <td class="num">${money(b.prize)}</td>
       <td class="num">${money(b.spent)}</td>
+      <td class="num" style="color:${b.net >= 0 ? 'var(--good)' : 'var(--critical)'}">${money(b.net)}</td>
     </tr>`).join('');
 
   return `
@@ -1075,15 +1129,16 @@ async function renderAnalytics(){
   <div class="card" style="margin-bottom:16px">
     <div class="card-title"><span class="title-icon violet">${icon('trophy')}</span> Suggested lobby range</div>
     ${a.suggestion
-      ? `<p style="margin:0;font-size:14px;line-height:1.6">Aim for <b>₹${a.suggestion.bracket} lobbies</b>. ${escapeHtml(a.suggestion.reason)}</p>`
-      : `<div class="empty-state"><p>Not enough completed lobbies with a recorded placement yet (need at least ${ANALYTICS_MIN_SAMPLE} in the same ₹10 bracket). Enter placement &amp; points when editing a completed slot to build this up.</p></div>`}
+      ? `<p style="margin:0;font-size:14px;line-height:1.6">Aim for <b>${money(a.suggestion.bracket)} lobbies</b>. ${escapeHtml(a.suggestion.reason)}</p>
+         ${a.suggestion.early ? `<p class="hint" style="margin:10px 0 0">Early signal — built from ${t.resultsRecorded} recorded ${t.resultsRecorded === 1 ? 'result' : 'results'}. It sharpens with every slot you log.</p>` : ''}`
+      : `<div class="empty-state"><p>Log a completed slot with its placement and points to unlock this. Once any lobby wins a prize, this switches to comparing your prize lobbies against the empty ones.</p></div>`}
   </div>
   <div class="card table-card">
     <div class="card-title" style="padding:16px 16px 0">Performance by lobby cost</div>
     <div class="card-sub" style="padding:0 16px">Grouped in ₹10 brackets</div>
     <div class="table-wrap"><table>
-      <thead><tr><th>Bracket</th><th>Played</th><th>Results</th><th>Top 3</th><th>Top 3 Rate</th><th>Avg Points</th><th>Prize Won</th><th>Spent</th></tr></thead>
-      <tbody>${bracketRows || '<tr class="empty-row"><td colspan="8">No completed lobbies yet.</td></tr>'}</tbody>
+      <thead><tr><th>Bracket</th><th>Played</th><th>Results</th><th>Top 3</th><th>Top 3 Rate</th><th>Avg Points</th><th>Prize Won</th><th>Spent</th><th>Net</th></tr></thead>
+      <tbody>${bracketRows || '<tr class="empty-row"><td colspan="9">No completed lobbies yet.</td></tr>'}</tbody>
     </table></div>
   </div>`;
 }
