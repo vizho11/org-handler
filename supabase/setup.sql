@@ -440,6 +440,9 @@ $$;
 
 -- Member auth (accountant / player) -------------------------------------------------------
 
+-- Parameter renamed (p_email -> p_phone) -- same (text, text) shape, but Postgres refuses to
+-- rename an input parameter via create or replace, so the old signature has to go first.
+drop function if exists member_login(text, text);
 create or replace function member_login(p_phone text, p_password text)
 returns jsonb
 language plpgsql security definer as $$
